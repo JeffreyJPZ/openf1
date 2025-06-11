@@ -98,7 +98,7 @@ async def _process_request(request: Request, path: str) -> list[dict] | Response
 
 
 @app.api_route("/{path:path}", methods=["GET", "POST"])
-@rate_limiter.limit("30/10seconds")  # 30 requests every 10 seconds per IP
+# @rate_limiter.limit("30/10seconds")  # 30 requests every 10 seconds per IP
 async def endpoint(request: Request, path: str):
     try:
         if path == "favicon.ico":
