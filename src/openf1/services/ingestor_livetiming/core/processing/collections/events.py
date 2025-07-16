@@ -57,9 +57,9 @@ class EventCause(str, Enum):
     DOUBLE_YELLOW_FLAG = "double-yellow-flag"
     RED_FLAG = "red-flag"
     BLUE_FLAG = "blue-flag"
-    BLACK_AND_WHITE_FLAG = "black-and-white-flag"
-    BLACK_AND_ORANGE_FLAG = "black-and-orange-flag"
     BLACK_FLAG = "black-flag"
+    BLACK_AND_ORANGE_FLAG = "black-and-orange-flag"
+    BLACK_AND_WHITE_FLAG = "black-and-white-flag"
     CHEQUERED_FLAG = "chequered-flag"
 
 
@@ -215,15 +215,19 @@ class EventsCollection(Collection):
         if not isinstance(race_control_message, str):
             return
         
-        # Find driver number, turn number, lap number, and UTC time of track limit violation
+        # Find driver number, turn number, lap number, and UTC time for track limit violation
         try:
-            match = re.search(
-                r"CAR\s+(?P<driver_number>\d+).*?TURN\s+(?P<turn_number>\d+).*?LAP\s+(?P<lap_number>\d+)\s+(?P<time>\b\d{2}:\d{2}:\d{2}\b)",
-                race_control_message
+            pattern = re.compile(
+                r"CAR\s+(?P<driver_number>\d+).*?"  # Captures driver number
+                r"TURN\s+(?P<turn_number>\d+).*?"   # Captures turn number
+                r"LAP\s+(?P<lap_number>\d+)\s+"     # Captures lap number
+                r"(?P<time>\b\d{2}:\d{2}:\d{2}\b)"  # Captures UTC time
             )
+            match = pattern.search(race_control_message)
+
             driver_number = int(match.group("driver_number"))
-            turn_number = int(match.group("turn_number"))
             lap_number = int(match.group("lap_number"))
+            turn_number = int(match.group("turn_number"))
             time = str(match.group("time"))
 
             # Combine UTC time with session date to get accurate time of track limit violation
@@ -245,9 +249,119 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
-            elapsed_time=message.timepoint - self.session_date_start,
+            elapsed_time=date - self.session_date_start,
             category=EventCategory.DRIVER_ACTION,
             cause=EventCause.OFF_TRACK,
+            details=details
+        )
+    
+
+    def _process_incident(self, message: Message) -> Event | None:
+        race_control_message = deep_get(obj=message.content, key="Message")
+
+        if not isinstance(race_control_message, str):
+            return
+        
+        try:
+            lap_number = int(deep_get(obj=message.content, key="Lap"))
+        except:
+            return
+        
+        try:
+            date = to_datetime(deep_get(obj=message.content, key="Utc"))
+            date = pytz.utc.localize(date)
+        except:
+            return
+        
+        # Find driver number(s), turn number (if it exists), and incident reason (if it exists) for incident
+        try:
+            pattern = re.compile(
+                r"(?:TURN (?P<turn_number>\d+)\s+)?"                                                        # Captures turn number if it exists
+                r"(?:LAP\s+(?P<lap_number>\d+)\s+)?"                                                        # Captures lap number if it exists
+                r"INCIDENT"
+                r"(?:\s+INVOLVING\s+CARS?\s+(?P<driver_numbers>(?:\d+\s+\(\w+\)(?:\s*,\s*|\s+AND\s+)?)+))?" # Captures driver numbers if they exist
+                r"\s+NOTED(?:\s+-\s+(?P<incident_reason>.+))?"                                              # Captures incident reason if it exists
+            )
+            match = pattern.search(race_control_message)
+
+            lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
+            turn_number = int(match.group("turn_number")) if match.group("turn_number") is not None else None
+            driver_numbers = re.findall(r"(\d+)", str(match.group("driver_numbers"))) if match.group("driver_numbers") is not None else None # Find all driver numbers
+            incident_reason = str(match.group("incident_reason")).replace(" ", "-").lower() if match.group("incident_reason") is not None else None # Convert reason to hyphenated lowercased tag
+            
+            driver_numbers = [int(driver_number) for driver_number in driver_numbers]
+        except:
+            return
+        
+        # Assume incidents with turn number are between drivers and have driver at fault listed first,
+        # and that incidents between more than two drivers do not specify the exact drivers (i.e. driver_numbers is None)
+        if driver_numbers is None:
+            # Incident does not specify drivers
+            driver_roles = None
+        elif turn_number is not None:
+            # Incident is between two drivers, with the first listed driver at fault
+            initiator_driver_number = driver_numbers[0]
+            participant_driver_number = driver_numbers[1]
+
+            driver_roles = {
+                initiator_driver_number: "initiator",
+                participant_driver_number: "participant"
+            }
+        else:
+            # Incident is not between drivers
+            driver_roles = {driver_number: "initiator" for driver_number in driver_numbers}
+
+        details = {
+            "lap_number": lap_number,
+            "turn_number": turn_number,
+            "reason": incident_reason,
+            "message": race_control_message,
+            "driver_roles": driver_roles
+        }
+
+        return Event(
+            meeting_key=self.meeting_key,
+            session_key=self.session_key,
+            date=date,
+            elapsed_time=date - self.session_date_start,
+            category=EventCategory.SECTOR_NOTIFICATION,
+            cause=EventCause.INCIDENT,
+            details=details
+        )
+    
+
+    def _process_driver_flag(self, message: Message, event_cause: EventCause) -> Event | None:
+        race_control_message = deep_get(obj=message.content, key="Message")
+
+        try:
+            driver_number = int(deep_get(obj=message.content, key="RacingNumber"))
+        except:
+            return
+        
+        try:
+            lap_number = int(deep_get(obj=message.content, key="Lap"))
+        except:
+            return
+        
+        try:
+            date = to_datetime(deep_get(obj=message.content, key="Utc"))
+            date = pytz.utc.localize(date)
+        except:
+            return
+        
+        details = {
+            "lap_number": lap_number,
+            "message": race_control_message,
+            "driver_roles": {driver_number: "initiator"}
+        }
+
+        return Event(
+            meeting_key=self.meeting_key,
+            session_key=self.session_key,
+            date=date,
+            elapsed_time=date - self.session_date_start,
+            category=EventCategory.DRIVER_NOTIFICATION,
+            cause=event_cause,
             details=details
         )
     
@@ -275,15 +389,14 @@ class EventsCollection(Collection):
         details = {
             "lap_number": lap_number,
             "turn_number": turn_number,
-            "message": race_control_message,
-            "driver_roles": None # Include null fields?
+            "message": race_control_message
         }
 
         return Event(
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
-            elapsed_time=message.timepoint - self.session_date_start,
+            elapsed_time=date - self.session_date_start,
             category=EventCategory.SECTOR_NOTIFICATION,
             cause=event_cause,
             details=details
@@ -307,25 +420,16 @@ class EventsCollection(Collection):
         except:
             return
         
-        # Turn numbers are referred to as "track sectors" for some reason
-        try:
-            match = re.search(r"TRACK\s+SECTOR\s+(?P<turn_number>\d+)", race_control_message)
-            turn_number = match.group("turn_number")
-        except:
-            return
-        
         details = {
             "lap_number": lap_number,
-            "turn_number": turn_number,
-            "message": race_control_message,
-            "driver_roles": None # Include null fields?
+            "message": race_control_message
         }
 
         return Event(
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
-            elapsed_time=message.timepoint - self.session_date_start,
+            elapsed_time=date - self.session_date_start,
             category=EventCategory.TRACK_NOTIFICATION,
             cause=event_cause,
             details=details
@@ -362,13 +466,19 @@ class EventsCollection(Collection):
             EventCause.OUT: lambda message: self._process_out(message),
             EventCause.OVERTAKE: lambda message: self._process_overtake(message),
             EventCause.OFF_TRACK: lambda message: self._process_off_track(message),
+            EventCause.INCIDENT: lambda message: self._process_incident(message),
             EventCause.GREEN_FLAG: lambda message: 
                 self._process_sector_flag(message=message, event_cause=EventCause.GREEN_FLAG) 
                 if deep_get(obj=message.content, key="Scope") == "Sector"
                 else self._process_track_flag(message=message, event_cause=EventCause.GREEN_FLAG),
             EventCause.YELLOW_FLAG: lambda message: self._process_sector_flag(message=message, event_cause=EventCause.YELLOW_FLAG),
-            EventCause.DOUBLE_YELLOW_FLAG: lambda message: self._process_sector_flag(message=message, event_cause=EventCause.DOUBLE_YELLOW_FLAG)
-            # TODO: add remaining event causes
+            EventCause.DOUBLE_YELLOW_FLAG: lambda message: self._process_sector_flag(message=message, event_cause=EventCause.DOUBLE_YELLOW_FLAG),
+            EventCause.RED_FLAG: lambda message: self._process_track_flag(message=message, event_cause=EventCause.RED_FLAG),
+            EventCause.BLUE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLUE_FLAG),
+            EventCause.BLACK_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_FLAG),
+            EventCause.BLACK_AND_ORANGE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_AND_ORANGE_FLAG),
+            EventCause.BLACK_AND_WHITE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_AND_WHITE_FLAG),
+            EventCause.CHEQUERED_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.CHEQUERED_FLAG)
         }
 
 
