@@ -364,7 +364,7 @@ class EventsCollection(Collection):
             EventCause.OFF_TRACK: lambda message: self._process_off_track(message),
             EventCause.GREEN_FLAG: lambda message: 
                 self._process_sector_flag(message=message, event_cause=EventCause.GREEN_FLAG) 
-                if deep_get(obj=message.content, key="Scope")
+                if deep_get(obj=message.content, key="Scope") == "Sector"
                 else self._process_track_flag(message=message, event_cause=EventCause.GREEN_FLAG),
             EventCause.YELLOW_FLAG: lambda message: self._process_sector_flag(message=message, event_cause=EventCause.YELLOW_FLAG),
             EventCause.DOUBLE_YELLOW_FLAG: lambda message: self._process_sector_flag(message=message, event_cause=EventCause.DOUBLE_YELLOW_FLAG)
