@@ -34,8 +34,8 @@ def deep_get(obj: Any, key: Any) -> Any:
     
 
 class EventCategory(str, Enum):
-    CAR_ACTION = "car-action" # Actions by drivers - pits, outs, overtakes, track limits violations, incidents
-    CAR_NOTIFICATION = "car-notification" # Race control messsages to drivers - blue flags, black flags, black and white flags, black and orange flags
+    DRIVER_ACTION = "driver-action" # Actions by drivers - pits, outs, overtakes, track limits violations, incidents
+    DRIVER_NOTIFICATION = "driver-notification" # Race control messsages to drivers - blue flags, black flags, black and white flags, black and orange flags
     SECTOR_NOTIFICATION = "sector-notification" # Green (sector clear), yellow, double-yellow flags
     TRACK_NOTIFICATION = "track-notification" # Green (track clear) flags, red flags, safety cars
     INCIDENT_NOTIFICATION = "incident-notification" # Incident verdicts by stewards
@@ -132,7 +132,7 @@ class EventsCollection(Collection):
             session_key=self.session_key,
             date=message.timepoint,
             elapsed_time=message.timepoint - self.session_date_start,
-            category=EventCategory.CAR_ACTION,
+            category=EventCategory.DRIVER_ACTION,
             cause=EventCause.PIT,
             details=details
         )
@@ -162,7 +162,7 @@ class EventsCollection(Collection):
             session_key=self.session_key,
             date=message.timepoint,
             elapsed_time=message.timepoint - self.session_date_start,
-            category=EventCategory.CAR_ACTION,
+            category=EventCategory.DRIVER_ACTION,
             cause=EventCause.OUT,
             details=details
         )
@@ -203,7 +203,7 @@ class EventsCollection(Collection):
             session_key=self.session_key,
             date=message.timepoint,
             elapsed_time=message.timepoint - self.session_date_start,
-            category=EventCategory.CAR_ACTION,
+            category=EventCategory.DRIVER_ACTION,
             cause=EventCause.OVERTAKE,
             details=details
         )
@@ -246,7 +246,7 @@ class EventsCollection(Collection):
             session_key=self.session_key,
             date=date,
             elapsed_time=message.timepoint - self.session_date_start,
-            category=EventCategory.CAR_ACTION,
+            category=EventCategory.DRIVER_ACTION,
             cause=EventCause.OFF_TRACK,
             details=details
         )
