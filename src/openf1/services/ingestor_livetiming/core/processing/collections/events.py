@@ -264,10 +264,6 @@ class EventsCollection(Collection):
         
         try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
-        except:
-            return
-        
-        try:
             date = to_datetime(deep_get(obj=message.content, key="Utc"))
             date = pytz.utc.localize(date)
         except:
@@ -286,10 +282,9 @@ class EventsCollection(Collection):
 
             lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
             turn_number = int(match.group("turn_number")) if match.group("turn_number") is not None else None
-            driver_numbers = re.findall(r"(\d+)", str(match.group("driver_numbers"))) if match.group("driver_numbers") is not None else None # Find all driver numbers
-            incident_reason = str(match.group("incident_reason")).replace(" ", "-").lower() if match.group("incident_reason") is not None else None # Convert reason to hyphenated lowercased tag
-            
-            driver_numbers = [int(driver_number) for driver_number in driver_numbers]
+            driver_numbers = str(match.group("driver_numbers")) if match.group("driver_numbers") is not None else None
+            driver_numbers = [int(driver_number) for driver_number in re.findall(r"(\d+)", driver_numbers)] if driver_numbers is not None else None
+            incident_reason = str(match.group("incident_reason")).replace(" ", "-").lower() if match.group("incident_reason") is not None else None
         except:
             return
         
@@ -335,15 +330,7 @@ class EventsCollection(Collection):
 
         try:
             driver_number = int(deep_get(obj=message.content, key="RacingNumber"))
-        except:
-            return
-        
-        try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
-        except:
-            return
-        
-        try:
             date = to_datetime(deep_get(obj=message.content, key="Utc"))
             date = pytz.utc.localize(date)
         except:
@@ -372,15 +359,7 @@ class EventsCollection(Collection):
         # Turn numbers are referred to as "sectors" for some reason
         try:
             turn_number = int(deep_get(obj=message.content, key="Sector"))
-        except:
-            return
-        
-        try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
-        except:
-            return
-        
-        try:
             date = to_datetime(deep_get(obj=message.content, key="Utc"))
             date = pytz.utc.localize(date)
         except:
@@ -411,10 +390,6 @@ class EventsCollection(Collection):
         
         try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
-        except:
-            return
-        
-        try:
             date = to_datetime(deep_get(obj=message.content, key="Utc"))
             date = pytz.utc.localize(date)
         except:
