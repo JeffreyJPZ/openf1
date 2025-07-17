@@ -90,17 +90,80 @@ class EventsCollection(Collection):
     }
     
     # Since messages are sorted by timepoint and then by topic we only need to keep the most recent data from other topics?
+    # Used for event creation
     session_date_start: datetime = field(default=None)
     session_type: str = field(default=None)
-    current_lap_number: int = field(default=None)
+    lap_number: int = field(default=None)
     driver_positions: dict[int, dict[Literal["X"] | Literal["Y"] | Literal["Z"], int]] = field(default_factory=dict)
     
+
+    def _update_lap_number(self, message: Message):
+        # Update current lap number
+            try:
+                lap_number = int(message.content.get("CurrentLap"))
+            except:
+                return
+            
+            self.lap_number = lap_number
+
+
+    def _update_session_info(self, message: Message):
+        # Update session start date and type
+        try:
+            date_start = to_datetime(message.content.get("StartDate"))
+            gmt_offset = message.content.get("GmtOffset")
+            date_start = add_timezone_info(dt=date_start, gmt_offset=gmt_offset)
+
+            session_type = str(message.content.get("Type"))
+        except:
+            return
+        
+        self.session_date_start = date_start
+        self.session_type = session_type
+
 
     def _update_driver_position(self, driver_number: int, property: Literal["X"] | Literal["Y"] | Literal["Z"], value: int):
         driver_position = self.driver_positions[driver_number]
         old_value = getattr(driver_position, property)
         if value != old_value:
             setattr(driver_position, property, value)
+
+
+    def _update_driver_positions(self, message: Message):
+        # Update driver positions using the latest values
+        positions = message.content.get("Position")
+
+        if not isinstance(positions, list):
+            return
+        
+        latest_positions = positions[-1]
+
+        if not isinstance(latest_positions, dict):
+            return
+        
+        latest_entries = latest_positions.get("Entries")
+
+        if not isinstance(latest_entries, dict):
+            return
+        
+        for driver_number, data in latest_entries.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+
+            if not isinstance(data, dict):
+                continue
+            
+            for property, value in data.items():
+                if property == "Status":
+                    continue
+
+                self._update_driver_position(
+                    driver_number=driver_number,
+                    property=property,
+                    value=value
+                )
     
 
     def _process_pit(self, message: Message) -> Event | None:
@@ -120,7 +183,7 @@ class EventsCollection(Collection):
             return
         
         details = {
-            "lap_number": self.current_lap_number,
+            "lap_number": self.lap_number,
             "driver_roles": {driver_number: "initiator"},
             "location_x": self.driver_positions.get(driver_number).get("X"),
             "location_y": self.driver_positions.get(driver_number).get("Y"),
@@ -150,7 +213,7 @@ class EventsCollection(Collection):
             return
 
         details = {
-            "lap_number": self.current_lap_number,
+            "lap_number": self.lap_number,
             "driver_roles": {driver_number: "initiator"},
             "location_x": self.driver_positions.get(driver_number).get("X"),
             "location_y": self.driver_positions.get(driver_number).get("Y"),
@@ -191,7 +254,7 @@ class EventsCollection(Collection):
         }
         
         details = {
-            "lap_number": self.current_lap_number,
+            "lap_number": self.lap_number,
             "driver_roles": driver_roles,
             "location_x": self.driver_positions.get(overtaking_driver_number).get("X"),
             "location_y": self.driver_positions.get(overtaking_driver_number).get("Y"),
@@ -459,67 +522,11 @@ class EventsCollection(Collection):
 
     def process_message(self, message: Message) -> Iterator[Event]:
         if message.topic == "LapCount":
-            # Update lap number
-            try:
-                current_lap_number = int(message.content.get("CurrentLap"))
-            except:
-                return
-            
-            self.current_lap_number = current_lap_number
-
+            self._update_lap_number(message)
         elif message.topic == "SessionInfo":
-            # Update session date and type
-            try:
-                date_start = to_datetime(message.content.get("StartDate"))
-                gmt_offset = message.content.get("GmtOffset")
-                date_start = add_timezone_info(dt=date_start, gmt_offset=gmt_offset)
-            except:
-                return
-
-            try:
-                session_type = str(message.content.get("Type"))
-            except:
-                return
-            
-            self.session_date_start = date_start
-            self.session_type = session_type
-
+            self._update_session_info(message)
         elif message.topic == "Position.z":
-            # Update driver positions
-            positions = message.content.get("Position")
-
-            if not isinstance(positions, list):
-                return
-            
-            latest_positions = positions[-1]
-
-            if not isinstance(latest_positions, dict):
-                return
-            
-            latest_entries = latest_positions.get("Entries")
-
-            if not isinstance(latest_entries, dict):
-                return
-            
-            for driver_number, data in latest_entries.items():
-                try:
-                    driver_number = int(driver_number)
-                except:
-                    continue
-
-                if not isinstance(data, dict):
-                    continue
-                
-                for property, value in data.items():
-                    if property == "Status":
-                        continue
-
-                    self._update_driver_position(
-                        driver_number=driver_number,
-                        property=property,
-                        value=value
-                    )
-
+            self._update_driver_positions(message)
         else:
             # Find event cause corresponding to message
             event_cause = next(
