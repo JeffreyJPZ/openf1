@@ -269,7 +269,7 @@ class EventsCollection(Collection):
         except:
             return
         
-        # Find driver number(s), turn number (if it exists), and incident reason (if it exists) for incident
+        # Find driver number(s), turn number (if it exists), lap number (if it exists), and incident reason (if it exists) for incident
         try:
             pattern = re.compile(
                 r"(?:TURN (?P<turn_number>\d+)\s+)?"                                                        # Captures turn number if it exists
