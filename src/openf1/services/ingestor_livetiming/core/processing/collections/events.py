@@ -12,7 +12,7 @@ from openf1.services.ingestor_livetiming.core.objects import (
     Document,
     Message,
 )
-from openf1.util.misc import to_datetime, add_timezone_info
+from openf1.util.misc import to_datetime, to_timedelta, add_timezone_info
 
 
 def deep_get(obj: Any, key: Any) -> Any:
@@ -104,12 +104,12 @@ class EventsCollection(Collection):
     
     # Since messages are sorted by timepoint and then by topic we only need to keep the most recent data from other topics?
     session_date_start: datetime = field(default=None)
-    session_type: str = field(default=None)
+    session_type: Literal["Practice", "Qualifying", "Race"] = field(default=None)
     lap_number: int = field(default=None)
     driver_positions: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(int)))
 
     # Combine latest stint data with latest pit data for pit event - stint number should be one more than pit number
-    driver_stints: dict[int, dict[Literal["stint_number", "compound", "is_new", "tyre_age_at_start"], bool | int | str]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(int)))
+    driver_stints: dict[int, dict[Literal["compound", "is_new", "tyre_age_at_start"], bool | int | str]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(int)))
     driver_pits: dict[int, dict[Literal["date", "pit_duration", "lap_number"], datetime | float | int]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(int)))
 
 
@@ -195,7 +195,7 @@ class EventsCollection(Collection):
             )
 
                 
-    def _update_driver_stint(self, driver_number: int, property: Literal["stint_number", "compound", "is_new", "tyre_age_at_start"], value: bool | int | str):
+    def _update_driver_stint(self, driver_number: int, property: Literal["compound", "is_new", "tyre_age_at_start"], value: bool | int | str):
         driver_stint = self.driver_stints.get(driver_number)
         old_value = getattr(driver_stint, property, None)
         if value != old_value:
@@ -224,40 +224,33 @@ class EventsCollection(Collection):
                 continue
             
             latest_stint_number = max(driver_stints.keys(), key=lambda stint_number: int(stint_number))
-            latest_stint_data = deep_get(obj=driver_stints, key=latest_stint_number)
+            latest_stint_data = driver_stints.get(latest_stint_number)
 
             if not isinstance(latest_stint_data, dict):
                 continue
-
-            # Stint numbers are 0-indexed, convert to 1-indexing
-            try:
-                latest_stint_number = int(latest_stint_number) + 1
+            
+            # Conditional updates since not all stint messages are identical
+            if "Compound" in latest_stint_data and isinstance(latest_stint_data.get("Compound"), str):
                 compound = str(latest_stint_data.get("Compound"))
+                self._update_driver_stint(
+                    driver_number=driver_number,
+                    property="compound",
+                    value=compound
+                )
+            if "New" in latest_stint_data and isinstance(latest_stint_data.get("New"), str):
                 is_new = True if str(latest_stint_data.get("New")) == "true" else False
+                self._update_driver_stint(
+                    driver_number=driver_number,
+                    property="is_new",
+                    value=is_new
+                )
+            if "TotalLaps" in latest_stint_data and isinstance(latest_stint_data.get("TotalLaps"), int):
                 total_laps = int(latest_stint_data.get("TotalLaps"))
-            except:
-                continue
-
-            self._update_driver_stint(
-                driver_number=driver_number,
-                property="stint_number",
-                value=latest_stint_number
-            )
-            self._update_driver_stint(
-                driver_number=driver_number,
-                property="compound",
-                value=compound
-            )
-            self._update_driver_stint(
-                driver_number=driver_number,
-                property="is_new",
-                value=is_new
-            )
-            self._update_driver_stint(
-                driver_number=driver_number,
-                property="tyre_age_at_start",
-                value=total_laps
-            )
+                self._update_driver_stint(
+                    driver_number=driver_number,
+                    property="tyre_age_at_start",
+                    value=total_laps
+                )
         
 
     def _update_driver_pit(self, driver_number: int, property: Literal["date", "pit_duration", "lap_number"], value: datetime | float | int):
@@ -308,11 +301,49 @@ class EventsCollection(Collection):
             )
 
 
-    def _process_hotlap(self, message: Message) -> Event | None:
-        return
+    def _process_hotlap(self, message: Message) -> Iterator[Event]:
+        timing_data = deep_get(obj=message.content, key="Lines")
+
+        if not isinstance(timing_data, dict):
+            return
+        
+        for driver_number, data in timing_data.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+
+            if not isinstance(data, dict):
+                continue
+
+            # Check if "Position" and "BestLapTime" fields exist - this indicates a personal best hotlap
+            try:
+                position = int(data.get("Position"))
+                lap_time = to_timedelta(data.get("BestLapTime", {}).get("Value"))
+            except:
+                continue
+
+            details = {
+                "compound": self.driver_stints.get(driver_number, {}).get("compound"),
+                "is_new": self.driver_stints.get(driver_number, {}).get("is_new"),
+                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
+                "position": position,
+                "lap_duration": lap_time.total_seconds(),
+                "driver_roles": {driver_number: "initiator"}
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                elapsed_time=message.timepoint - self.session_date_start,
+                category=EventCategory.DRIVER_ACTION,
+                cause=EventCause.HOTLAP,
+                details=details
+            )
     
 
-    def _process_incident(self, message: Message) -> Event | None:
+    def _process_incident(self, message: Message) -> Iterator[Event]:
         race_control_message = deep_get(obj=message.content, key="Message")
 
         if not isinstance(race_control_message, str):
@@ -371,7 +402,7 @@ class EventsCollection(Collection):
             "driver_roles": driver_roles
         }
 
-        return Event(
+        yield Event(
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
@@ -382,7 +413,7 @@ class EventsCollection(Collection):
         )
     
 
-    def _process_off_track(self, message: Message) -> Event | None:
+    def _process_off_track(self, message: Message) -> Iterator[Event]:
         race_control_message = deep_get(obj=message.content, key="Message")
 
         if not isinstance(race_control_message, str):
@@ -418,7 +449,7 @@ class EventsCollection(Collection):
             "driver_roles": {driver_number: "initiator"},
         }
 
-        return Event(
+        yield Event(
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
@@ -429,37 +460,39 @@ class EventsCollection(Collection):
         )
     
 
-    def _process_out(self, message: Message) -> Event | None:
-        driver_number = next(
-            (driver_number for driver_number, data in message.content.items()
-                if isinstance(driver_number, int) and isinstance(data, dict) and data.get("IsOut") == True
-            ),
-            None
-        )
+    def _process_out(self, message: Message) -> Iterator[Event]:
+        for driver_number, data in message.content.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
 
-        if driver_number is None:
-            return
+            if not isinstance(data, dict):
+                continue
 
-        details = {
-            "lap_number": self.lap_number,
-            "driver_roles": {driver_number: "initiator"},
-            "location_x": self.driver_positions.get(driver_number).get("x"),
-            "location_y": self.driver_positions.get(driver_number).get("y"),
-            "location_z": self.driver_positions.get(driver_number).get("z")
-        }
+            if not data.get("IsOut"):
+                continue
 
-        return Event(
-            meeting_key=self.meeting_key,
-            session_key=self.session_key,
-            date=message.timepoint,
-            elapsed_time=message.timepoint - self.session_date_start,
-            category=EventCategory.DRIVER_ACTION,
-            cause=EventCause.OUT,
-            details=details
-        )
+            details = {
+                "lap_number": self.lap_number,
+                "driver_roles": {driver_number: "initiator"},
+                "location_x": self.driver_positions.get(driver_number, {}).get("x"),
+                "location_y": self.driver_positions.get(driver_number, {}).get("y"),
+                "location_z": self.driver_positions.get(driver_number, {}).get("z")
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                elapsed_time=message.timepoint - self.session_date_start,
+                category=EventCategory.DRIVER_ACTION,
+                cause=EventCause.OUT,
+                details=details
+            )
         
 
-    def _process_overtake(self, message: Message) -> Event | None:
+    def _process_overtake(self, message: Message) -> Iterator[Event]:
         # Separate overtaking driver from overtaken drivers
         # Overtake state 2 indicates that the driver is the one overtaking, all other drivers are being overtaken
         overtaking_driver_number = next(
@@ -484,12 +517,12 @@ class EventsCollection(Collection):
         details = {
             "lap_number": self.lap_number,
             "driver_roles": driver_roles,
-            "location_x": self.driver_positions.get(overtaking_driver_number).get("x"),
-            "location_y": self.driver_positions.get(overtaking_driver_number).get("y"),
-            "location_z": self.driver_positions.get(overtaking_driver_number).get("z")
+            "location_x": self.driver_positions.get(overtaking_driver_number, {}).get("x"),
+            "location_y": self.driver_positions.get(overtaking_driver_number, {}).get("y"),
+            "location_z": self.driver_positions.get(overtaking_driver_number, {}).get("z")
         }
 
-        return Event(
+        yield Event(
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=message.timepoint,
@@ -500,47 +533,65 @@ class EventsCollection(Collection):
         )
     
 
-    def _process_pit(self, message: Message) -> Event | None:
-        # TODO: check if session is race and 
-        pit_data = deep_get(obj=message.content, key="PitTimes")
-
-        if not isinstance(pit_data, dict):
+    def _process_pit(self, message: Message) -> Iterator[Event]:
+        # Use stint information to determine if a pit has occurred since pit information arrives before corresponding stint information
+        # driver_pits should already be updated at this point
+        stints = deep_get(obj=message.content, key="Lines")
+        
+        if not isinstance(stints, dict):
             return
         
-        driver_number = next(
-            (driver_number for driver_number, data in pit_data.items()
-                if isinstance(driver_number, int) and isinstance(data, dict)
-            ),
-            None
-        )
+        for driver_number, data in stints.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+            
+            if not isinstance(data, dict):
+                continue
 
-        if driver_number is None:
-            return
+            driver_stints = deep_get(obj=data, key="Stints")
+
+            if not isinstance(driver_stints, dict) or len(driver_stints.keys() == 0):
+                continue
+            
+            latest_stint_number = max(driver_stints.keys(), key=lambda stint_number: int(stint_number))
+            latest_stint_data = driver_stints.get(latest_stint_number)
+
+            if not isinstance(latest_stint_data, dict):
+                continue
         
-        details = {
-            "lap_number": self.lap_number,
-            "driver_roles": {driver_number: "initiator"},
-            "location_x": self.driver_positions.get(driver_number).get("X"),
-            "location_y": self.driver_positions.get(driver_number).get("Y"),
-            "location_z": self.driver_positions.get(driver_number).get("Z")
-        }
+            if not "Compound" in latest_stint_data or not "New" in latest_stint_data or not "TotalLaps" in latest_stint_data:
+                continue
 
-        return Event(
-            meeting_key=self.meeting_key,
-            session_key=self.session_key,
-            date=message.timepoint,
-            elapsed_time=message.timepoint - self.session_date_start,
-            category=EventCategory.DRIVER_ACTION,
-            cause=EventCause.PIT,
-            details=details
-        )
+            details = {
+                "compound": self.driver_stints.get(driver_number, {}).get("compound"),
+                "is_new": self.driver_stints.get(driver_number, {}).get("is_new"),
+                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
+                "lap_number": self.lap_number,
+                "pit_duration": self.driver_pits.get(driver_number, {}).get("pit_duration"),
+                "driver_roles": {driver_number: "initiator"},
+                "location_x": self.driver_positions.get(driver_number, {}).get("X"),
+                "location_y": self.driver_positions.get(driver_number, {}).get("Y"),
+                "location_z": self.driver_positions.get(driver_number, {}).get("Z")
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                elapsed_time=message.timepoint - self.session_date_start,
+                category=EventCategory.DRIVER_ACTION,
+                cause=EventCause.PIT,
+                details=details
+            )
     
 
-    def _process_incident_verdict(self, message: Message) -> Event | None:
+    def _process_incident_verdict(self, message: Message) -> Iterator[Event]:
         return
     
 
-    def _process_driver_flag(self, message: Message, event_cause: EventCause) -> Event | None:
+    def _process_driver_flag(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
         race_control_message = deep_get(obj=message.content, key="Message")
 
         try:
@@ -557,7 +608,7 @@ class EventsCollection(Collection):
             "driver_roles": {driver_number: "initiator"}
         }
 
-        return Event(
+        yield Event(
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
@@ -568,7 +619,7 @@ class EventsCollection(Collection):
         )
     
 
-    def _process_sector_flag(self, message: Message, event_cause: EventCause) -> Event | None:
+    def _process_sector_flag(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
         race_control_message = deep_get(obj=message.content, key="Message")
 
         # Turn numbers are referred to as "sectors" for some reason
@@ -586,7 +637,7 @@ class EventsCollection(Collection):
             "message": race_control_message
         }
 
-        return Event(
+        yield Event(
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
@@ -597,7 +648,7 @@ class EventsCollection(Collection):
         )
     
 
-    def _process_track_flag(self, message: Message, event_cause: EventCause) -> Event | None:
+    def _process_track_flag(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
         race_control_message = deep_get(obj=message.content, key="Message")
 
         if not isinstance(race_control_message, str):
@@ -615,7 +666,7 @@ class EventsCollection(Collection):
             "message": race_control_message
         }
 
-        return Event(
+        yield Event(
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
@@ -626,8 +677,8 @@ class EventsCollection(Collection):
         )
     
 
-    def _process_qualifying_part_start(self, message: Message, event_cause: EventCause) -> Event | None:
-        return Event(
+    def _process_qualifying_part_start(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
+        yield Event(
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=message.timepoint,
@@ -642,62 +693,140 @@ class EventsCollection(Collection):
     # message should be of type Message
     def _get_event_condition_map(self) -> dict[EventCause, Callable[..., bool]]:
         return {
-            EventCause.HOTLAP: lambda message: True, # TODO: determine fields that identify a hotlap
-            EventCause.INCIDENT: lambda message: message.topic == "RaceControlMessages" and deep_get(obj=message.content, key="Message") is not None and all([
-                "INCIDENT" in deep_get(obj=message.content, key="Message"),
-                "NOTED" in deep_get(obj=message.content, key="Message")
+            EventCause.HOTLAP: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingData",
+                lambda: self.session_type == ("Practice" or "Qualifying"),
+                lambda: deep_get(obj=message.content, key="Position") is not None,
+                lambda: deep_get(obj=message.content, key="BestLapTime") is not None
             ]),
-            EventCause.OFF_TRACK: lambda message: message.topic == "RaceControlMessages" and deep_get(obj=message.content, key="Message") is not None and "TRACK LIMITS" in deep_get(obj=message.content, key="Message"),
-            EventCause.OUT: lambda message: message.topic == "DriverRaceInfo" and deep_get(obj=message.content, key="IsOut") is not None,
-            EventCause.OVERTAKE: lambda message: message.topic == "DriverRaceInfo" and deep_get(obj=message.content, key="OvertakeState") is not None and deep_get(obj=message.content, key="Position") is not None,
-            EventCause.PIT: lambda message: True, # TODO: use stint fields from TimingAppData to create pit event since they are behind by several seconds
+            EventCause.INCIDENT: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Message"),
+                lambda: "INCIDENT" in deep_get(obj=message.content, key="Message"),
+                lambda: "NOTED" in deep_get(obj=message.content, key="Message")
+            ]),
+            EventCause.OFF_TRACK: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: "TRACK LIMITS" in deep_get(obj=message.content, key="Message")
+            ]),
+            EventCause.OUT: lambda message: all(cond() for cond in [
+                lambda: message.topic == "DriverRaceInfo",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="IsOut") is not None
+            ]),
+            EventCause.OVERTAKE: lambda message: all(cond() for cond in [
+                lambda: message.topic == "DriverRaceInfo",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="OvertakeState") is not None,
+                lambda: deep_get(obj=message.content, key="Position") is not None
+            ]),
+            EventCause.PIT: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingAppData",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="Compound") is not None,
+                lambda: deep_get(obj=message.content, key="New") is not None,
+                lambda: deep_get(obj=message.content, key="TotalLaps") is not None
+            ]),
 
-            EventCause.BLACK_FLAG: lambda message: message.topic == "RaceControlMessages" and deep_get(obj=message.content, key="Message") is not None and "BLACK" in deep_get(obj=message.content, key="Message"), # Black flags do not have their own category
-            EventCause.BLACK_AND_ORANGE_FLAG: lambda message: message.topic == "RaceControlMessages" and deep_get(obj=message.content, key="Message") is not None and "BLACK AND ORANGE" in deep_get(obj=message.content, key="Message"),
-            EventCause.BLACK_AND_WHITE_FLAG: lambda message: message.topic == "RaceControlMessages" and deep_get(obj=message.content, key="Message") is not None and "BLACK AND WHITE" in deep_get(obj=message.content, key="Message"),
-            EventCause.BLUE_FLAG: lambda message: message.topic == "RaceControlMessages" and deep_get(obj=message.content, key="Flag") is not None and deep_get(obj=message.content, key="Flag") == "BLUE",
-            EventCause.INCIDENT_VERDICT: lambda message: message.topic == "RaceControlMessages" and deep_get(obj=message.content, key="Message") is not None and all([
-                "FIA STEWARDS" in deep_get(obj=message.content, key="Message"),
-                "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message") # "Under investigation" is not a verdict
+            EventCause.BLACK_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Message") is not None, # Check that message is not None to avoid TypeError when searching for substring
+                lambda: "BLACK" in deep_get(obj=message.content, key="Message")
+            ]), # Black flags do not have their own category
+            EventCause.BLACK_AND_ORANGE_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: "BLACK AND ORANGE" in deep_get(obj=message.content, key="Message")
+            ]),
+            EventCause.BLACK_AND_WHITE_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: "BLACK AND WHITE" in deep_get(obj=message.content, key="Message")
+            ]),
+            EventCause.BLUE_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Flag") == "BLUE"
+            ]),
+            EventCause.INCIDENT_VERDICT: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: "FIA STEWARDS" in deep_get(obj=message.content, key="Message"),
+                lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message") # "Under investigation" is not a verdict
             ]),
 
-            EventCause.GREEN_FLAG: lambda message: message.topic == "RaceControlMessages" and deep_get(obj=message.content, key="Flag") is not None and any([
-                deep_get(obj=message.content, key="Flag") == "GREEN",
-                deep_get(obj=message.content, key="Flag") == "CLEAR",
+            EventCause.GREEN_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages"
+            ]) and any(cond() for cond in [
+                lambda: deep_get(obj=message.content, key="Flag") == "GREEN",
+                lambda: deep_get(obj=message.content, key="Flag") == "CLEAR",
             ]),
-            EventCause.YELLOW_FLAG: lambda message: message.topic == "RaceControlMessages" and deep_get(obj=message.content, key="Flag") is not None and deep_get(obj=message.content, key="Flag") == "YELLOW",
-            EventCause.DOUBLE_YELLOW_FLAG: lambda message: message.topic == "RaceControlMessages" and deep_get(obj=message.content, key="Flag") is not None and deep_get(obj=message.content, key="Flag") == "DOUBLE YELLOW",
+            EventCause.YELLOW_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Flag") == "YELLOW"
+            ]),
+            EventCause.DOUBLE_YELLOW_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Flag") == "DOUBLE YELLOW"
+            ]),
             
-            EventCause.CHEQUERED_FLAG: lambda message: message.topic == "RaceControlMessages" and deep_get(obj=message.content, key="Flag") is not None and deep_get(obj=message.content, key="Flag") == "CHEQUERED",
-            EventCause.RED_FLAG: lambda message: message.topic == "RaceControlMessages" and deep_get(obj=message.content, key="Flag") is not None and deep_get(obj=message.content, key="Flag") == "RED",
-            EventCause.SAFETY_CAR_DEPLOYED: lambda message: message.topic == "RaceControlMessages" and all([
-                deep_get(obj=message.content, key="Category") is not None and deep_get(obj=message.content, key="Category") == "SafetyCar",
-                deep_get(obj=message.content, key="Mode") is not None and deep_get(obj=message.content, key="Mode") == "SAFETY CAR",
-                deep_get(obj=message.content, key="Status") is not None and deep_get(obj=message.content, key="Status") == "DEPLOYED"
+            EventCause.CHEQUERED_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Flag") == "CHEQUERED"
             ]),
-            EventCause.VIRTUAL_SAFETY_CAR_DEPLOYED: lambda message: message.topic == "RaceControlMessages" and all([
-                deep_get(obj=message.content, key="Category") is not None and deep_get(obj=message.content, key="Category") == "SafetyCar",
-                deep_get(obj=message.content, key="Mode") is not None and deep_get(obj=message.content, key="Mode") == "VIRTUAL SAFETY CAR",
-                deep_get(obj=message.content, key="Status") is not None and deep_get(obj=message.content, key="Status") == "DEPLOYED"
+            EventCause.RED_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Flag") == "RED"
             ]),
-            EventCause.SAFETY_CAR_ENDING: lambda message: message.topic == "RaceControlMessages" and all([
-                deep_get(obj=message.content, key="Category") is not None and deep_get(obj=message.content, key="Category") == "SafetyCar",
-                deep_get(obj=message.content, key="Mode") is not None and deep_get(obj=message.content, key="Mode") == "SAFETY CAR",
-                deep_get(obj=message.content, key="Status") is not None and deep_get(obj=message.content, key="Status") == "IN THIS LAP"
+            EventCause.SAFETY_CAR_DEPLOYED: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="Category") == "SafetyCar",
+                lambda: deep_get(obj=message.content, key="Mode") == "SAFETY CAR",
+                lambda: deep_get(obj=message.content, key="Status") == "DEPLOYED"
             ]),
-            EventCause.VIRTUAL_SAFETY_CAR_ENDING: lambda message: message.topic == "RaceControlMessages" and all([
-                deep_get(obj=message.content, key="Category") is not None and deep_get(obj=message.content, key="Category") == "SafetyCar",
-                deep_get(obj=message.content, key="Mode") is not None and deep_get(obj=message.content, key="Mode") == "VIRTUAL SAFETY CAR",
-                deep_get(obj=message.content, key="Status") is not None and deep_get(obj=message.content, key="Status") == "ENDING"
+            EventCause.VIRTUAL_SAFETY_CAR_DEPLOYED: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="Category") == "SafetyCar",
+                lambda: deep_get(obj=message.content, key="Mode") == "VIRTUAL SAFETY CAR",
+                lambda: deep_get(obj=message.content, key="Status") == "DEPLOYED"
             ]),
-            EventCause.Q1_START: lambda message: message.topic == "TimingData" and deep_get(obj=message.content, key="SessionPart") is not None and deep_get(obj=message.content, key="SessionPart") == 1, 
-            EventCause.Q2_START: lambda message: message.topic == "TimingData" and deep_get(obj=message.content, key="SessionPart") is not None and deep_get(obj=message.content, key="SessionPart") == 2,
-            EventCause.Q3_START: lambda message: message.topic == "TimingData" and deep_get(obj=message.content, key="SessionPart") is not None and deep_get(obj=message.content, key="SessionPart") == 3
+            EventCause.SAFETY_CAR_ENDING: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="Category") == "SafetyCar",
+                lambda: deep_get(obj=message.content, key="Mode") == "SAFETY CAR",
+                lambda: deep_get(obj=message.content, key="Status") == "IN THIS LAP"
+            ]),
+            EventCause.VIRTUAL_SAFETY_CAR_ENDING: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="Category") == "SafetyCar",
+                lambda: deep_get(obj=message.content, key="Mode") == "VIRTUAL SAFETY CAR",
+                lambda: deep_get(obj=message.content, key="Status") == "ENDING"
+            ]),
+            EventCause.Q1_START: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingData",
+                lambda: self.session_type == "Qualifying",
+                lambda: deep_get(obj=message.content, key="SessionPart") == 1
+            ]),
+            EventCause.Q2_START: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingData",
+                lambda: self.session_type == "Qualifying",
+                lambda: deep_get(obj=message.content, key="SessionPart") == 2
+            ]),
+            EventCause.Q3_START: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingData",
+                lambda: self.session_type == "Qualifying",
+                lambda: deep_get(obj=message.content, key="SessionPart") == 3
+            ])
         }
 
+    
     # Maps event causes to specific processing logic
     # message should be of type Message
-    def _get_event_processing_map(self) -> dict[EventCause, Callable[..., Event | None]]:
+    def _get_event_processing_map(self) -> dict[EventCause, Callable[..., Iterator[Event]]]:
         return {
             EventCause.HOTLAP: lambda message: self._process_hotlap(message),
             EventCause.INCIDENT: lambda message: self._process_incident(message),
@@ -745,16 +874,16 @@ class EventsCollection(Collection):
         
         # Find event cause corresponding to message
         event_cause = next(
-            (event_cause for event_cause, condition in self._get_event_condition_map().items()
-                if condition(message.content)
+            (event_cause for event_cause, cond in self._get_event_condition_map().items()
+                if cond(message.content)
             ),
             None
         )
 
         if event_cause is None:
             # Not an event message
-            yield None
+            return
         
-        yield self._get_event_processing_map().get(event_cause)(message)       
+        yield from self._get_event_processing_map().get(event_cause)(message)
 
         
