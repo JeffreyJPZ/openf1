@@ -356,47 +356,47 @@ class EventsCollection(Collection):
         except:
             return
         
-        # Find driver number(s), turn number (if it exists), lap number (if it exists), and incident reason (if it exists) for incident
-        try:
-            pattern = re.compile(
-                r"(?:TURN (?P<turn_number>\d+)\s+)?"                                                        # Captures turn number if it exists
-                r"(?:LAP\s+(?P<lap_number>\d+)\s+)?"                                                        # Captures lap number if it exists
-                r"INCIDENT"
-                r"(?:\s+INVOLVING\s+CARS?\s+(?P<driver_numbers>(?:\d+\s+\(\w+\)(?:\s*,\s*|\s+AND\s+)?)+))?" # Captures driver numbers if they exist
-                r"\s+NOTED(?:\s+-\s+(?P<incident_reason>.+))?"                                              # Captures incident reason if it exists
-            )
-            match = pattern.search(race_control_message)
+        # Extract incident information from race control message
+        incident_pattern = (
+            r"^"
+            r"(?:FIA\s+STEWARDS:\s+)?"
+            r"(?:(?P<location>[A-Z0-9/\s]+?)\s+)?"                                                      # Captures location if it exists
+            r"(?:LAP\s+(?P<lap_number>\d+)\s+)?"                                                        # Captures lap number if it exists
+            r"INCIDENT"
+            r"(?:\s+INVOLVING\s+CARS?\s+(?P<driver_numbers>(?:\d+\s+\(\w+\)(?:\s*,\s*|\s+AND\s+)?)+))?" # Captures driver numbers if they exist
+            r"\s+"
+            r"NOTED"
+            r"(?:\s+-\s+(?P<incident_reason>.+))?"                                                      # Captures incident reason if it exists
+            r"$"
+        )
+        match = re.search(pattern=incident_pattern, string=race_control_message)
 
-            lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
-            turn_number = int(match.group("turn_number")) if match.group("turn_number") is not None else None
-            driver_numbers = str(match.group("driver_numbers")) if match.group("driver_numbers") is not None else None
-            driver_numbers = [int(driver_number) for driver_number in re.findall(r"(\d+)", driver_numbers)] if driver_numbers is not None else None
-            incident_reason = str(match.group("incident_reason")).replace(" ", "-").lower() if match.group("incident_reason") is not None else None
-        except:
-            return
+        incident_location = str(match.group("location")) if match.group("location") is not None else None
+        incident_lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
+        incident_driver_numbers = [int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))] if match.group("driver_numbers") is not None else None
+        incident_reason = str(match.group("incident_reason")) if match.group("incident_reason") is not None else None
         
-        # Assume incidents with turn number are between drivers and have driver at fault listed first,
-        # and that incidents between more than two drivers do not specify the exact drivers (i.e. driver_numbers is None)
-        if driver_numbers is None:
+        # Assume incidents between drivers specify a location and incidents between two or more drivers have driver at fault listed first,
+        # since penalties can only be given if one driver is wholly or predominantly at fault?
+        if incident_driver_numbers is None:
             # Incident does not specify drivers
             driver_roles = None
-        elif turn_number is not None:
-            # Incident is between two drivers, with the first listed driver at fault
-            # TODO: more exception handling
-            initiator_driver_number = driver_numbers[0]
-            participant_driver_number = driver_numbers[1]
+        elif incident_location is not None:
+            # Incident is between drivers, with the first listed driver at fault
+            initiator_driver_number = incident_driver_numbers[0]
+            participant_driver_numbers = incident_driver_numbers[1::]
 
             driver_roles = {
-                initiator_driver_number: "initiator",
-                participant_driver_number: "participant"
+                **{initiator_driver_number: "initiator"},
+                **{driver_number: "participant" for driver_number in participant_driver_numbers}
             }
         else:
             # Incident is not between drivers
-            driver_roles = {driver_number: "initiator" for driver_number in driver_numbers}
+            driver_roles = {driver_number: "initiator" for driver_number in incident_driver_numbers}
 
         details = {
-            "lap_number": lap_number,
-            "turn_number": turn_number,
+            "location": incident_location,
+            "lap_number": incident_lap_number if incident_lap_number is not None else lap_number,
             "reason": incident_reason,
             "message": race_control_message,
             "driver_roles": driver_roles
@@ -419,34 +419,39 @@ class EventsCollection(Collection):
         if not isinstance(race_control_message, str):
             return
         
-        # Find driver number, turn number, lap number, and UTC time for track limit violation
         try:
-            pattern = re.compile(
-                r"CAR\s+(?P<driver_number>\d+).*?"  # Captures driver number
-                r"TURN\s+(?P<turn_number>\d+).*?"   # Captures turn number
-                r"LAP\s+(?P<lap_number>\d+)\s+"     # Captures lap number
-                r"(?P<time>\b\d{2}:\d{2}:\d{2}\b)"  # Captures UTC time
-            )
-            match = pattern.search(race_control_message)
-
-            driver_number = int(match.group("driver_number"))
-            lap_number = int(match.group("lap_number"))
-            turn_number = int(match.group("turn_number"))
-            time = str(match.group("time"))
-
-            # Combine UTC time with session date to get accurate time of track limit violation
-            date = self.session_date_start.combine(
-                date=self.session_date_start.date(),
-                time=datetime.strptime(time, "%H:%M:%S").time(),
-                tzinfo=self.session_date_start.tzinfo
-            )
+            lap_number = int(deep_get(obj=message.content, key="Lap"))
         except:
             return
         
+        # Extract track violation information from race control message
+        off_track_pattern = (
+            r"^"
+            r"CAR\s+(?P<driver_number>\d+).*?"      # Captures driver number
+            r"AT\s+(?P<location>[A-Z0-9/\s]+)\s+"   # Captures location
+            r"LAP\s+(?P<lap_number>\d+)\s+"         # Captures lap number
+            r"(?P<time>\b\d{2}:\d{2}:\d{2}\b)"      # Captures UTC time
+            r"$"
+        )
+        match = re.search(pattern=off_track_pattern, string=race_control_message)
+
+        off_track_driver_number = int(match.group("driver_number")) if match.group("driver_number") is None else None
+        off_track_location = int(match.group("location")) if match.group("location") is None else None
+        off_track_lap_number = int(match.group("lap_number")) if match.group("lap_number") is None else None
+        off_track_time = str(match.group("time")) if match.group("time") is None else None
+
+        # Combine UTC time with session date to get accurate time of track limit violation
+        date = self.session_date_start.combine(
+            date=self.session_date_start.date(),
+            time=datetime.strptime(off_track_time, "%H:%M:%S").time(),
+            tzinfo=self.session_date_start.tzinfo
+        )
+        
         details = {
-            "lap_number": lap_number,
-            "turn_number": turn_number,
-            "driver_roles": {driver_number: "initiator"},
+            "lap_number": off_track_lap_number if off_track_lap_number is not None else lap_number, # Note: lap number has no meaning in qualifying as it is individual to driver
+            "location": off_track_location,
+            "message": race_control_message,
+            "driver_roles": {off_track_driver_number: "initiator"}
         }
 
         yield Event(
@@ -588,7 +593,106 @@ class EventsCollection(Collection):
     
 
     def _process_incident_verdict(self, message: Message) -> Iterator[Event]:
-        return
+        race_control_message = deep_get(obj=message.content, key="Message")
+
+        if not isinstance(race_control_message, str):
+            return
+        
+        try:
+            lap_number = int(deep_get(obj=message.content, key="Lap"))
+        except:
+            return
+        
+        # Extract incident verdict information from race control message
+        # We need two patterns as penalty verdicts differ from others in structure
+        incident_verdict_pattern = (
+            r"^"
+            r"(?:FIA\s+STEWARDS:\s+)?"
+            r"(?:(?P<location>[A-Z0-9/\s]+?)\s+)?"                                                      # Captures location if it exists
+            r"(?:LAP\s+(?P<lap_number>\d+)\s+)?"                                                        # Captures lap number if it exists
+            r"INCIDENT"
+            r"(?:\s+INVOLVING\s+CARS?\s+(?P<driver_numbers>(?:\d+\s+\(\w+\)(?:\s*,\s*|\s+AND\s+)?)+))?" # Captures driver numbers if they exist
+            r"\s+"
+            r"(?P<verdict>[^-]+?)"                                                                      # Captures verdict
+            r"(?:\s*-\s*(?P<reason>.+))?"                                                               # Captures reason if it exists
+            r"$"
+        )
+
+        penalty_verdict_pattern = (
+            r"^"
+            r"(?:FIA\s+STEWARDS:\s+)?"
+            r"(?P<verdict>.+?)"                                                                         # Captures verdict
+            r"\s+FOR\s+CAR\s+"
+            r"(?P<driver_number>\d+)\s+\(\w+\)"                                                         # Captures driver number
+            r"(?:\s*-\s*(?P<reason>.+))?"                                                               # Captures reason if it exists
+            r"$"
+        )
+
+        match = re.search(pattern=incident_verdict_pattern, string=race_control_message)
+
+        if match is not None:
+            incident_verdict_location = str(match.group("location")) if match.group("location") is not None else None
+            incident_verdict_lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
+            incident_verdict_driver_numbers = [int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))] if match.group("driver_numbers") is not None else None
+            incident_verdict = str(match.group("verdict")) if match.group("verdict") is not None else None
+            incident_verdict_reason = str(match.group("reason")) if match.group("reason") is not None else None
+            
+            if incident_verdict_driver_numbers is None:
+                # Incident does not specify drivers
+                    driver_roles = None
+            elif incident_verdict_location is not None:
+                # Incident is between drivers, with the first listed driver at fault
+                initiator_driver_number = incident_verdict_driver_numbers[0]
+                participant_driver_numbers = incident_verdict_driver_numbers[1::]
+
+                driver_roles = {
+                    **{initiator_driver_number: "initiator"},
+                    **{driver_number: "participant" for driver_number in participant_driver_numbers}
+                }
+            else:
+                # Incident is not between drivers
+                driver_roles = {driver_number: "initiator" for driver_number in incident_verdict_driver_numbers}
+
+            details = {
+                "location": incident_verdict_location,
+                "lap_number": incident_verdict_lap_number if incident_verdict_lap_number is not None else lap_number,
+                "verdict": incident_verdict,
+                "reason": incident_verdict_reason,
+                "message": race_control_message,
+                "driver_roles": driver_roles
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                elapsed_time=message.timepoint - self.session_date_start,
+                category=EventCategory.DRIVER_NOTIFICATION,
+                cause=EventCause.INCIDENT_VERDICT,
+                details=details
+            )
+        else:
+            match = re.search(pattern=penalty_verdict_pattern, string=race_control_message)
+
+            incident_verdict = str(match.group("verdict")) if match.group("verdict") is not None else None
+            incident_verdict_driver_number = int(match.group("driver_number")) if match.group("driver_number") is not None else None
+            incident_verdict_reason = str(match.group("reason")) if match.group("reason") is not None else None
+            
+            details = {
+                "verdict": incident_verdict,
+                "reason": incident_verdict_reason,
+                "driver_roles": {incident_verdict_driver_number: "initiator"}
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                elapsed_time=message.timepoint - self.session_date_start,
+                category=EventCategory.DRIVER_NOTIFICATION,
+                cause=EventCause.INCIDENT_VERDICT,
+                details=details
+            )
     
 
     def _process_driver_flag(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
@@ -752,7 +856,9 @@ class EventsCollection(Collection):
                 lambda: message.topic == "RaceControlMessages",
                 lambda: deep_get(obj=message.content, key="Message") is not None,
                 lambda: "FIA STEWARDS" in deep_get(obj=message.content, key="Message"),
-                lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message") # "Under investigation" is not a verdict
+                lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message"), # "UNDER INVESTIGATION" is not a verdict
+                lambda: "WILL BE INVESTIGATED AFTER THE RACE" not in deep_get(obj=message.content, key="Message"), # "WILL BE INVESTIGATED AFTER THE RACE" is not a verdict
+                lambda: "WILL BE INVESTIGATED AFTER THE SESSION" not in deep_get(obj=message.content, key="Message") # "WILL BE INVESTIGATED AFTER THE SESSION" is not a verdict
             ]),
 
             EventCause.GREEN_FLAG: lambda message: all(cond() for cond in [
