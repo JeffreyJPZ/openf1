@@ -12,7 +12,7 @@ from openf1.services.ingestor_livetiming.core.objects import (
     Document,
     Message,
 )
-from openf1.util.misc import deep_get, to_datetime, to_timedelta, add_timezone_info
+from openf1.util.misc import deep_get, to_datetime, to_timedelta
     
 
 class EventCategory(str, Enum):
