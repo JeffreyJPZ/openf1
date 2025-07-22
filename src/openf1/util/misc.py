@@ -59,6 +59,25 @@ def json_serializer(obj):
     raise TypeError(f"Type {type(obj)} not serializable")
 
 
+def deep_get(obj: Any, key: Any) -> Any:
+    """
+    This function was adapted from https://stackoverflow.com/a/9808122.
+    Returns the first value indexed by the given key in an arbitrarily nested JSON-serializable object.
+    otherwise returns None.
+    """
+    for k, v in (
+        obj.items() if isinstance(obj, dict) else
+        enumerate(obj) if isinstance(obj, list) else
+        []
+    ):
+        if k == key:
+            return v
+        elif isinstance(v, (dict, list)):
+            return deep_get(v, key)
+        
+    return False
+
+
 def to_datetime(x: str | datetime | None) -> datetime | None:
     """This function is taken from FastF1: https://github.com/theOehrly/Fast-F1/blob/317bacf8c61038d7e8d0f48165330167702b349f/fastf1/utils.py#L178
 
