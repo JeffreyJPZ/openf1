@@ -376,8 +376,8 @@ class EventsCollection(Collection):
             details: EventDetails = {
                 "driver_role": {driver_number: "initiator"},
                 "position": position,
-                "compound": self.driver_stints.get(driver_number, {}).get("compound"),
-                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
+                "compound": self.driver_stints[driver_number]["compound"],
+                "tyre_age_at_start": self.driver_stints[driver_number]["tyre_age_at_start"],
                 "lap_duration": lap_time.total_seconds()
             }
 
@@ -488,7 +488,7 @@ class EventsCollection(Collection):
         try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
         except:
-            return
+            lap_number = None
         
         # Extract track violation information from race control message
         off_track_pattern = (
@@ -528,7 +528,7 @@ class EventsCollection(Collection):
             date = None
 
         details: EventDetails = {
-            "lap_number": off_track_lap_number if off_track_lap_number is not None else lap_number, # Note: lap number for qualifying incidents is individual to driver
+            "lap_number": off_track_lap_number if off_track_lap_number is None else lap_number, # Note: lap number for qualifying incidents is individual to driver
             "marker": off_track_marker,
             "message": race_control_message,
             "driver_roles": {off_track_driver_number: "initiator"}
@@ -560,9 +560,9 @@ class EventsCollection(Collection):
             details: EventDetails = {
                 "lap_number": self.lap_number,
                 "marker": {
-                    "x": self.driver_positions.get(driver_number, {}).get("x"),
-                    "y": self.driver_positions.get(driver_number, {}).get("y"),
-                    "z": self.driver_positions.get(driver_number, {}).get("z")
+                    "x": self.driver_positions[driver_number]["x"],
+                    "y": self.driver_positions[driver_number]["y"],
+                    "z": self.driver_positions[driver_number]["z"]
                 },
                 "driver_roles": {driver_number: "initiator"}
             }
@@ -602,9 +602,9 @@ class EventsCollection(Collection):
         details: EventDetails = {
             "lap_number": self.lap_number,
             "marker": {
-                "x": self.driver_positions.get(overtaking_driver_number, {}).get("x"),
-                "y": self.driver_positions.get(overtaking_driver_number, {}).get("y"),
-                "z": self.driver_positions.get(overtaking_driver_number, {}).get("z")
+                "x": self.driver_positions[overtaking_driver_number]["x"],
+                "y": self.driver_positions[overtaking_driver_number]["y"],
+                "z": self.driver_positions[overtaking_driver_number]["z"]
             },
             "driver_roles": driver_roles
         }
@@ -651,17 +651,17 @@ class EventsCollection(Collection):
                 continue
 
             details: EventDetails = {
-                "lap_number": self.lap_number,
+                "lap_number": self.driver_pits[driver_number]["lap_number"],
                 "driver_roles": {driver_number: "initiator"},
-                "compound": self.driver_stints.get(driver_number, {}).get("compound"),
-                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
-                "pit_duration": self.driver_pits.get(driver_number, {}).get("pit_duration")
+                "compound": self.driver_stints[driver_number]["compound"],
+                "tyre_age_at_start": self.driver_stints[driver_number]["tyre_age_at_start"],
+                "pit_duration": self.driver_pits[driver_number]["pit_duration"]
             }
 
             yield Event(
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
-                date=message.timepoint,
+                date=self.driver_pits[driver_number]["date"],
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.PIT.value,
                 details=details
@@ -677,7 +677,7 @@ class EventsCollection(Collection):
         try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
         except:
-            return
+            lap_number = None
         
         # Extract incident verdict information from race control message
         # We need two patterns as penalty verdicts differ from others in structure
