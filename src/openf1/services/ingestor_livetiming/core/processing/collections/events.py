@@ -3,7 +3,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Callable, Iterator, Literal
+from typing import Any, Callable, Iterator, Literal, TypedDict
 
 import pytz
 
@@ -55,17 +55,9 @@ class EventCause(str, Enum):
     Q3_START = "q3-start"
 
 
-@dataclass(eq=False)
-class Event(Document):
-    meeting_key: int
-    session_key: int
-    date: datetime
-    elapsed_time: timedelta
-    category: str
-    cause: str
-
+class EventDetails(TypedDict):
     """
-    details can contain any of the following attributes:
+    Event details can contain any of the following attributes:
     
     lap_number: int | None
         Describes lap numbers for events belonging to race sessions or the number of completed laps by a driver in practice/qualifying sessions.
@@ -117,8 +109,28 @@ class Event(Document):
         The total time spent in the pit lane, in seconds, for a pit.
     
     """
-    details: dict[str, Any]
-    
+    lap_number: int | None
+    marker: str | dict[Literal["x", "y", "z"], int] | None
+    driver_roles: dict[int, Literal["initiator", "participant"]] | None
+    position: int | None
+    lap_duration: float | None
+    verdict: str | None
+    reason: str | None
+    message: str | None
+    compound: str | None
+    tyre_age_at_start: int | None
+    pit_duration: float | None
+
+
+@dataclass(eq=False)
+class Event(Document):
+    meeting_key: int
+    session_key: int
+    date: datetime
+    elapsed_time: timedelta
+    category: str
+    cause: str
+    details: EventDetails
     
     @property
     def unique_key(self) -> tuple:
@@ -143,11 +155,22 @@ class EventsCollection(Collection):
     session_start: datetime = field(default=None) # NOTE: this is not the start date of the session, but the start date when messages begin appearing
     session_type: Literal["Practice", "Qualifying", "Race"] = field(default=None)
     lap_number: int = field(default=None)
-    driver_positions: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(int)))
+    driver_positions: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(lambda: {
+        "x": None,
+        "y": None,
+        "z": None
+    }))
 
     # Combine latest stint data with latest pit data for pit event - stint number should be one more than pit number
-    driver_stints: dict[int, dict[Literal["compound", "tyre_age_at_start"], int | str]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(int)))
-    driver_pits: dict[int, dict[Literal["date", "pit_duration", "lap_number"], datetime | float | int]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(int)))
+    driver_stints: dict[int, dict[Literal["compound", "tyre_age_at_start"], int | str]] = field(default_factory=lambda: defaultdict(lambda: {
+        "compound": None,
+        "tyre_age_at_start": None
+    }))
+    driver_pits: dict[int, dict[Literal["date", "pit_duration", "lap_number"], datetime | float | int]] = field(default_factory=lambda: defaultdict(lambda: {
+        "date": None,
+        "pit_duration": None,
+        "lap_number": None
+    }))
 
 
     def _update_lap_number(self, message: Message):
@@ -363,8 +386,8 @@ class EventsCollection(Collection):
             except:
                 lap_time = None
 
-            details = {
-                "driver_roles": {driver_number: "initiator"},
+            details: EventDetails = {
+                "driver_role": {driver_number: "initiator"},
                 "position": position,
                 "compound": self.driver_stints.get(driver_number, {}).get("compound"),
                 "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
@@ -452,7 +475,7 @@ class EventsCollection(Collection):
             # Incident is not between drivers
             driver_roles = {driver_number: "initiator" for driver_number in incident_driver_numbers}
 
-        details = {
+        details: EventDetails = {
             "lap_number": incident_lap_number if incident_lap_number is not None else lap_number,
             "marker": incident_marker,
             "reason": incident_reason,
@@ -519,7 +542,7 @@ class EventsCollection(Collection):
         except:
             date = None
 
-        details = {
+        details: EventDetails = {
             "lap_number": off_track_lap_number if off_track_lap_number is not None else lap_number, # Note: lap number for qualifying incidents is individual to driver
             "marker": off_track_marker,
             "message": race_control_message,
@@ -550,7 +573,7 @@ class EventsCollection(Collection):
             if not "IsOut" in data:
                 continue
 
-            details = {
+            details: EventDetails = {
                 "lap_number": self.lap_number,
                 "marker": {
                     "x": self.driver_positions.get(driver_number, {}).get("x"),
@@ -593,7 +616,7 @@ class EventsCollection(Collection):
             **{driver_number: "participant" for driver_number in overtaken_driver_numbers}
         }
         
-        details = {
+        details: EventDetails = {
             "lap_number": self.lap_number,
             "marker": {
                 "x": self.driver_positions.get(overtaking_driver_number, {}).get("x"),
@@ -645,7 +668,7 @@ class EventsCollection(Collection):
             if not "Compound" in latest_stint_data or not "TotalLaps" in latest_stint_data:
                 continue
 
-            details = {
+            details: EventDetails = {
                 "lap_number": self.lap_number,
                 "driver_roles": {driver_number: "initiator"},
                 "compound": self.driver_stints.get(driver_number, {}).get("compound"),
@@ -744,7 +767,7 @@ class EventsCollection(Collection):
                 # Incident is not between drivers
                 driver_roles = {driver_number: "initiator" for driver_number in incident_verdict_driver_numbers}
 
-            details = {
+            details: EventDetails = {
                 "lap_number": incident_verdict_lap_number if incident_verdict_lap_number is not None else lap_number,
                 "marker": incident_verdict_marker,
                 "verdict": incident_verdict,
@@ -780,7 +803,7 @@ class EventsCollection(Collection):
             except:
                 incident_verdict_reason = None
             
-            details = {
+            details: EventDetails = {
                 "verdict": incident_verdict,
                 "reason": incident_verdict_reason,
                 "message": race_control_message,
@@ -830,7 +853,7 @@ class EventsCollection(Collection):
             except:
                 driver_number = None
 
-        details = {
+        details: EventDetails = {
             "lap_number": lap_number,
             "message": race_control_message,
             "driver_roles": {driver_number: "initiator"} if driver_number is not None else None
@@ -874,7 +897,7 @@ class EventsCollection(Collection):
         except:
             sector_marker = None
         
-        details = {
+        details: EventDetails = {
             "lap_number": lap_number,
             "marker": sector_marker,
             "message": race_control_message
@@ -908,7 +931,7 @@ class EventsCollection(Collection):
         except:
             lap_number = None
         
-        details = {
+        details: EventDetails = {
             "lap_number": lap_number,
             "message": race_control_message
         }
@@ -1128,7 +1151,7 @@ class EventsCollection(Collection):
         # Find event cause corresponding to message
         event_cause = next(
             (event_cause for event_cause, cond in self._get_event_condition_map().items()
-                if cond(message.content)
+                if cond(message)
             ),
             None
         )
