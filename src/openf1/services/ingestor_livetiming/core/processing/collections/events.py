@@ -154,10 +154,10 @@ class EventsCollection(Collection):
     session_start: datetime = field(default=None) # NOTE: this is not the start date of the session, but the start date when messages begin appearing
     session_type: Literal["Practice", "Qualifying", "Race"] = field(default=None)
     lap_number: int = field(default=None)
-    driver_positions: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(lambda: None)))
+    driver_positions: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(dict))
     # Combine latest stint data with latest pit data for pit event - stint number should be one more than pit number
-    driver_stints: dict[int, dict[Literal["compound", "tyre_age_at_start"], int | str]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(lambda: None)))
-    driver_pits: dict[int, dict[Literal["date", "pit_duration", "lap_number"], datetime | float | int]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(lambda: None)))
+    driver_stints: dict[int, dict[Literal["compound", "tyre_age_at_start"], int | str]] = field(default_factory=lambda: defaultdict(dict))
+    driver_pits: dict[int, dict[Literal["date", "pit_duration", "lap_number"], datetime | float | int]] = field(default_factory=lambda: defaultdict(dict))
 
 
     def _update_lap_number(self, message: Message):
@@ -182,7 +182,7 @@ class EventsCollection(Collection):
 
 
     def _update_driver_position(self, driver_number: int, property: Literal["x", "y", "z"], value: int):
-        driver_position = self.driver_positions[driver_number][property]  
+        driver_position = self.driver_positions[driver_number] 
         old_value = getattr(driver_position, property, None)
         if value != old_value:
             setattr(driver_position, property, value)
@@ -239,7 +239,7 @@ class EventsCollection(Collection):
 
                 
     def _update_driver_stint(self, driver_number: int, property: Literal["compound", "tyre_age_at_start"], value: bool | int | str):
-        driver_stint = self.driver_stints[driver_number][property]
+        driver_stint = self.driver_stints[driver_number]
         old_value = getattr(driver_stint, property, None)
         if value != old_value:
             setattr(driver_stint, property, value)
@@ -299,7 +299,7 @@ class EventsCollection(Collection):
         
 
     def _update_driver_pit(self, driver_number: int, property: Literal["date", "pit_duration", "lap_number"], value: datetime | float | int):
-        driver_pit = self.driver_pits[driver_number][property]
+        driver_pit = self.driver_pits[driver_number]
         old_value = getattr(driver_pit, property, None)
         if value != old_value:
             setattr(driver_pit, property, value)
