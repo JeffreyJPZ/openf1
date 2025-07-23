@@ -181,11 +181,11 @@ class EventsCollection(Collection):
         self.session_type = session_type
 
 
-    def _update_driver_position(self, driver_number: int, property: Literal["x", "y", "z"], value: int):
+    def _update_driver_position(self, driver_number: int, key: Literal["x", "y", "z"], value: int):
         driver_position = self.driver_positions[driver_number] 
-        old_value = getattr(driver_position, property, None)
+        old_value = driver_position.get(key)
         if value != old_value:
-            setattr(driver_position, property, value)
+            driver_position[key] = value
             
 
     def _update_driver_positions(self, message: Message):
@@ -223,26 +223,26 @@ class EventsCollection(Collection):
 
             self._update_driver_position(
                 driver_number=driver_number,
-                property="x",
+                key="x",
                 value=x
             )
             self._update_driver_position(
                 driver_number=driver_number,
-                property="y",
+                key="y",
                 value=y
             )
             self._update_driver_position(
                 driver_number=driver_number,
-                property="z",
+                key="z",
                 value=z
             )
 
                 
-    def _update_driver_stint(self, driver_number: int, property: Literal["compound", "tyre_age_at_start"], value: bool | int | str):
+    def _update_driver_stint(self, driver_number: int, key: Literal["compound", "tyre_age_at_start"], value: bool | int | str):
         driver_stint = self.driver_stints[driver_number]
-        old_value = getattr(driver_stint, property, None)
+        old_value = driver_stint.get(key)
         if value != old_value:
-            setattr(driver_stint, property, value)
+            driver_stint[key] = value
             
 
     def _update_driver_stints(self, message: Message):
@@ -281,7 +281,7 @@ class EventsCollection(Collection):
 
                 self._update_driver_stint(
                     driver_number=driver_number,
-                    property="compound",
+                    key="compound",
                     value=compound
                 )
 
@@ -293,16 +293,16 @@ class EventsCollection(Collection):
 
                 self._update_driver_stint(
                     driver_number=driver_number,
-                    property="tyre_age_at_start",
+                    key="tyre_age_at_start",
                     value=total_laps
                 )
         
 
-    def _update_driver_pit(self, driver_number: int, property: Literal["date", "pit_duration", "lap_number"], value: datetime | float | int):
+    def _update_driver_pit(self, driver_number: int, key: Literal["date", "pit_duration", "lap_number"], value: datetime | float | int):
         driver_pit = self.driver_pits[driver_number]
-        old_value = getattr(driver_pit, property, None)
+        old_value = driver_pit.get(key)
         if value != old_value:
-            setattr(driver_pit, property, value)
+            driver_pit[key] = value
 
 
     def _update_driver_pits(self, message: Message):
@@ -329,17 +329,17 @@ class EventsCollection(Collection):
 
             self._update_driver_pit(
                 driver_number=driver_number,
-                property="date",
+                key="date",
                 value=message.timepoint
             )
             self._update_driver_pit(
                 driver_number=driver_number,
-                property="pit_duration",
+                key="pit_duration",
                 value=pit_duration
             )
             self._update_driver_pit(
                 driver_number=driver_number,
-                property="lap_number",
+                key="lap_number",
                 value=lap_number
             )
 
