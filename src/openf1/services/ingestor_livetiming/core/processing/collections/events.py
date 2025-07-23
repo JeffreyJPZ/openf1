@@ -1,0 +1,1141 @@
+import re
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Callable, Iterator, Literal
+
+import pytz
+
+from openf1.services.ingestor_livetiming.core.objects import (
+    Collection,
+    Document,
+    Message,
+)
+from openf1.util.misc import deep_get, to_datetime, to_timedelta
+    
+
+class EventCategory(str, Enum):
+    DRIVER_ACTION = "driver-action" # Actions by drivers - pits, outs, overtakes, hotlaps, track limits violations, incidents
+    DRIVER_NOTIFICATION = "driver-notification" # Race control messsages to drivers - blue flags, black flags, black and white flags, black and orange flags, incident verdicts
+    SECTOR_NOTIFICATION = "sector-notification" # Green (sector clear), yellow, double-yellow flags
+    TRACK_NOTIFICATION = "track-notification" # Green (track clear) flags, red flags, chequered flags, safety cars, start of qualifying session parts
+
+
+class EventCause(str, Enum):
+    # Driver actions
+    HOTLAP = "hotlap" # Used in qualifying/practice sessions - personal best laps resulting in position changes
+    INCIDENT = "incident" # Collisions, unsafe rejoin, safety car/start infringements, etc.
+    OFF_TRACK = "off-track" # Track limits violations
+    OUT = "out"
+    OVERTAKE = "overtake"
+    PIT = "pit"
+    
+    # Driver notifications
+    BLACK_FLAG = "black-flag"
+    BLACK_AND_ORANGE_FLAG = "black-and-orange-flag"
+    BLACK_AND_WHITE_FLAG = "black-and-white-flag"
+    BLUE_FLAG = "blue-flag"
+    INCIDENT_VERDICT = "incident-verdict" # Penalties, reprimands, no further investigations, etc.
+
+    # Sector notifications
+    GREEN_FLAG = "green-flag"
+    YELLOW_FLAG = "yellow-flag"
+    DOUBLE_YELLOW_FLAG = "double-yellow-flag"
+
+    # Track notifications
+    CHEQUERED_FLAG = "chequered-flag"
+    RED_FLAG = "red-flag"
+    SAFETY_CAR_DEPLOYED = "safety-car-deployed"
+    VIRTUAL_SAFETY_CAR_DEPLOYED = "virtual-safety-car-deployed"
+    SAFETY_CAR_ENDING = "safety-car-ending"
+    VIRTUAL_SAFETY_CAR_ENDING = "virtual-safety-car-ending"
+    Q1_START = "q1-start"
+    Q2_START = "q2-start"
+    Q3_START = "q3-start"
+
+
+@dataclass(eq=False)
+class Event(Document):
+    meeting_key: int
+    session_key: int
+    date: datetime
+    elapsed_time: timedelta
+    category: str
+    cause: str
+
+    """
+    details can contain any of the following attributes:
+    
+    lap_number: int | None
+        Describes lap numbers for events belonging to race sessions or the number of completed laps by a driver in practice/qualifying sessions.
+
+    marker: str | dict[Literal['x', 'y', 'z'], int] | None
+        Describes qualifying phases, turns and sectors for incident events, driver locations for overtake events.
+        Examples:
+            - 'Q1'
+            - 'TURN 4'
+            - 'SECTOR 13'
+            - {'x': 1000, 'y': -150, 'z': 2}
+
+    driver_roles: dict[int, Literal['initiator', 'participant']] | None
+        Maps driver numbers to a role describing their involvement in the event:
+            - 'initiator' if the driver was the main reason for the event (e.g. causing an incident)
+            - 'participant' if the driver is merely involved in the event (e.g. being overtaken, being the victim of an incident).
+        Events that only involve one driver (e.g. pit, out) will list the driver as the initiator
+
+    position: int | None
+        Describes the updated position on the timing board for a hotlap or overtake event.
+
+    lap_duration: float | None
+        The lap time, in seconds, for a hotlap.
+
+    verdict: str | None
+        The outcome of an incident.
+        Examples:
+            - 'REVIEWED NO FURTHER INVESTIGATION'
+            - '10 SECOND TIME PENALTY'
+            - 'DRIVE THROUGH PENALTY'
+
+    reason: str | None
+        The type of infringement for an incident.
+        Examples:
+            - 'REJOINING UNSAFELY'
+            - 'CAUSING A COLLISION'
+            - 'STARTING PROCEDURE INFRINGEMENT'
+
+    message: str | None
+        The full race control message for flag and incident events.
+
+    compound: str | None
+        The tyre compound for hotlap and pit events.
+
+    tyre_age_at_start: int | None
+        The number of laps for a tyre at the time of the event - used for hotlap and pit events.
+
+    pit_duration: float | None
+        The total time spent in the pit lane, in seconds, for a pit.
+    
+    """
+    details: dict[str, Any]
+    
+    
+    @property
+    def unique_key(self) -> tuple:
+        return (self.date, self.cause)
+
+
+class EventsCollection(Collection):
+    name = "events"
+    source_topics = {
+        "DriverRaceInfo",
+        "LapCount",
+        "PitLaneTimeCollection",
+        "Position.z",
+        "RaceControlMessages",
+        "SessionInfo",
+        "TimingData",
+        "TimingAppData"
+    }
+    
+    # Since messages are sorted by timepoint and then by topic we only need to keep the most recent data from other topics?
+    session_start: datetime = field(default=None) # NOTE: this is not the start date of the session, but the start date when messages begin appearing
+    session_type: Literal["Practice", "Qualifying", "Race"] = field(default=None)
+    lap_number: int = field(default=None)
+    driver_positions: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(int)))
+
+    # Combine latest stint data with latest pit data for pit event - stint number should be one more than pit number
+    driver_stints: dict[int, dict[Literal["compound", "tyre_age_at_start"], int | str]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(int)))
+    driver_pits: dict[int, dict[Literal["date", "pit_duration", "lap_number"], datetime | float | int]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(int)))
+
+
+    def _update_lap_number(self, message: Message):
+        # Update current lap number
+        try:
+            lap_number = int(deep_get(obj=message.content, key="CurrentLap"))
+        except:
+            return
+        
+        self.lap_number = lap_number
+
+
+    def _update_session_info(self, message: Message):
+        # Update session start and type
+        try:
+            session_type = str(deep_get(obj=message.content, key="Type"))
+        except:
+            return
+        
+        self.session_start = message.timepoint
+        self.session_type = session_type
+
+
+    def _update_driver_position(self, driver_number: int, property: Literal["x", "y", "z"], value: int):
+        driver_position = self.driver_positions.get(driver_number)
+        old_value = getattr(driver_position, property, None)
+        if value != old_value:
+            setattr(driver_position, property, value)
+            
+
+    def _update_driver_positions(self, message: Message):
+        # Update driver positions using the latest values
+        positions = deep_get(obj=message.content, key="Position")
+
+        if not isinstance(positions, list):
+            return
+        
+        latest_positions = positions[-1]
+
+        if not isinstance(latest_positions, dict):
+            return
+        
+        latest_entries = deep_get(obj=latest_positions, key="Entries")
+
+        if not isinstance(latest_entries, dict):
+            return
+        
+        for driver_number, data in latest_entries.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+            
+            if not isinstance(data, dict):
+                continue
+            
+            try:
+                x = int(data.get("X"))
+                y = int(data.get("Y"))
+                z = int(data.get("Z"))
+            except:
+                continue
+
+            self._update_driver_position(
+                driver_number=driver_number,
+                property="x",
+                value=x
+            )
+            self._update_driver_position(
+                driver_number=driver_number,
+                property="y",
+                value=y
+            )
+            self._update_driver_position(
+                driver_number=driver_number,
+                property="z",
+                value=z
+            )
+
+                
+    def _update_driver_stint(self, driver_number: int, property: Literal["compound", "tyre_age_at_start"], value: bool | int | str):
+        driver_stint = self.driver_stints.get(driver_number)
+        old_value = getattr(driver_stint, property, None)
+        if value != old_value:
+            setattr(driver_stint, property, value)
+            
+
+    def _update_driver_stints(self, message: Message):
+        # Update driver stints using the latest values
+        stints = deep_get(obj=message.content, key="Lines")
+        
+        if not isinstance(stints, dict):
+            return
+        
+        for driver_number, data in stints.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+            
+            if not isinstance(data, dict):
+                continue
+
+            driver_stints = deep_get(obj=data, key="Stints")
+
+            if not isinstance(driver_stints, dict) or len(driver_stints.keys() == 0):
+                continue
+            
+            latest_stint_number = max(driver_stints.keys(), key=lambda stint_number: int(stint_number))
+            latest_stint_data = driver_stints.get(latest_stint_number)
+
+            if not isinstance(latest_stint_data, dict):
+                continue
+            
+            # Conditional updates since not all stint messages are identical
+            if "Compound" in latest_stint_data:
+                try:
+                    compound = str(latest_stint_data.get("Compound"))
+                except:
+                    continue
+
+                self._update_driver_stint(
+                    driver_number=driver_number,
+                    property="compound",
+                    value=compound
+                )
+
+            if "TotalLaps" in latest_stint_data:
+                try:
+                    total_laps = int(latest_stint_data.get("TotalLaps"))
+                except:
+                    continue
+
+                self._update_driver_stint(
+                    driver_number=driver_number,
+                    property="tyre_age_at_start",
+                    value=total_laps
+                )
+        
+
+    def _update_driver_pit(self, driver_number: int, property: Literal["date", "pit_duration", "lap_number"], value: datetime | float | int):
+        driver_pit = self.driver_pits.get(driver_number)
+        old_value = getattr(driver_pit, property, None)
+        if value != old_value:
+            setattr(driver_pit, property, value)
+
+
+    def _update_driver_pits(self, message: Message):
+        # Update driver pits using the latest values
+        pit_data = deep_get(obj=message.content, key="PitTimes")
+        
+        if not isinstance(pit_data, dict):
+            return
+        
+        for driver_number, data in pit_data.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+            
+            if not isinstance(data, dict):
+                continue
+
+            try:
+                pit_duration = float(data.get("Duration"))
+                lap_number = int(data.get("Lap"))
+            except:
+                continue
+
+            self._update_driver_pit(
+                driver_number=driver_number,
+                property="date",
+                value=message.timepoint
+            )
+            self._update_driver_pit(
+                driver_number=driver_number,
+                property="pit_duration",
+                value=pit_duration
+            )
+            self._update_driver_pit(
+                driver_number=driver_number,
+                property="lap_number",
+                value=lap_number
+            )
+
+
+    def _process_hotlap(self, message: Message) -> Iterator[Event]:
+        timing_data = deep_get(obj=message.content, key="Lines")
+
+        if not isinstance(timing_data, dict):
+            return
+        
+        for driver_number, data in timing_data.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+
+            if not isinstance(data, dict):
+                continue
+
+            # Check if "Position" and "BestLapTime" fields exist - this indicates a personal best hotlap
+            if not "Position" in data or not "BestLapTime" in data:
+                continue
+
+            try:
+                position = int(data.get("Position"))
+            except:
+                position = None
+
+            try:
+                lap_time = to_timedelta(data.get("BestLapTime", {}).get("Value"))
+            except:
+                lap_time = None
+
+            details = {
+                "driver_roles": {driver_number: "initiator"},
+                "position": position,
+                "compound": self.driver_stints.get(driver_number, {}).get("compound"),
+                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
+                "lap_duration": lap_time.total_seconds()
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                elapsed_time=message.timepoint - self.session_start,
+                category=EventCategory.DRIVER_ACTION,
+                cause=EventCause.HOTLAP,
+                details=details
+            )
+    
+
+    def _process_incident(self, message: Message) -> Iterator[Event]:
+        race_control_message = deep_get(obj=message.content, key="Message")
+
+        if not isinstance(race_control_message, str):
+            return
+        
+        try:
+            date = to_datetime(deep_get(obj=message.content, key="Utc"))
+            date = pytz.utc.localize(date)
+        except:
+            date = None
+
+        try:
+            lap_number = int(deep_get(obj=message.content, key="Lap"))
+        except:
+            lap_number = None
+        
+        # Extract incident information from race control message
+        incident_pattern = (
+            r"^"
+            r"(?:FIA\s+STEWARDS:\s+)?"
+            r"(?:(?P<marker>[A-Z0-9/\s]+?)\s+)?"                                                      # Captures marker if it exists
+            r"(?:LAP\s+(?P<lap_number>\d+)\s+)?"                                                        # Captures lap number if it exists
+            r"INCIDENT"
+            r"(?:\s+INVOLVING\s+CARS?\s+(?P<driver_numbers>(?:\d+\s+\(\w+\)(?:\s*,\s*|\s+AND\s+)?)+))?" # Captures driver numbers if they exist
+            r"\s+"
+            r"NOTED"
+            r"(?:\s+-\s+(?P<incident_reason>.+))?"                                                      # Captures incident reason if it exists
+            r"$"
+        )
+        match = re.search(pattern=incident_pattern, string=race_control_message)
+
+        try:
+            incident_marker = str(match.group("marker"))
+        except:
+            incident_marker = None
+        
+        try:
+            incident_lap_number = int(match.group("lap_number"))
+        except:
+            incident_lap_number = None
+
+        try:
+            incident_driver_numbers = [int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))]
+        except:
+            incident_driver_numbers = None
+
+        try:
+            incident_reason = str(match.group("incident_reason"))
+        except:
+            incident_reason = None
+        
+        # Assume incidents between drivers specify a location and incidents between two or more drivers have driver at fault listed first,
+        # since penalties can only be given if one driver is wholly or predominantly at fault?
+        if incident_driver_numbers is None:
+            # Incident does not specify drivers
+            driver_roles = None
+        elif len(incident_driver_numbers) >= 2 and incident_marker is not None:
+            # Incident is between drivers, with the first listed driver at fault
+            initiator_driver_number = incident_driver_numbers[0]
+            participant_driver_numbers = incident_driver_numbers[1::]
+
+            driver_roles = {
+                **{initiator_driver_number: "initiator"},
+                **{driver_number: "participant" for driver_number in participant_driver_numbers}
+            }
+        else:
+            # Incident is not between drivers
+            driver_roles = {driver_number: "initiator" for driver_number in incident_driver_numbers}
+
+        details = {
+            "lap_number": incident_lap_number if incident_lap_number is not None else lap_number,
+            "marker": incident_marker,
+            "reason": incident_reason,
+            "message": race_control_message,
+            "driver_roles": driver_roles
+        }
+
+        yield Event(
+            meeting_key=self.meeting_key,
+            session_key=self.session_key,
+            date=date,
+            elapsed_time=date - self.session_start if date is not None else None,
+            category=EventCategory.DRIVER_ACTION,
+            cause=EventCause.INCIDENT,
+            details=details
+        )
+    
+
+    def _process_off_track(self, message: Message) -> Iterator[Event]:
+        race_control_message = deep_get(obj=message.content, key="Message")
+
+        if not isinstance(race_control_message, str):
+            return
+        
+        try:
+            lap_number = int(deep_get(obj=message.content, key="Lap"))
+        except:
+            return
+        
+        # Extract track violation information from race control message
+        off_track_pattern = (
+            r"^"
+            r"CAR\s+(?P<driver_number>\d+).*?"      # Captures driver number
+            r"AT\s+(?P<marker>[A-Z0-9/\s]+)\s+"     # Captures marker
+            r"LAP\s+(?P<lap_number>\d+)\s+"         # Captures lap number
+            r"(?P<time>\b\d{2}:\d{2}:\d{2}\b)"      # Captures UTC time
+            r"$"
+        )
+        match = re.search(pattern=off_track_pattern, string=race_control_message)
+
+        try:
+            off_track_driver_number = int(match.group("driver_number"))
+        except:
+            off_track_driver_number = None
+        
+        try:
+            off_track_marker = int(match.group("marker"))
+        except:
+            off_track_marker = None
+
+        try:
+            off_track_lap_number = int(match.group("lap_number"))
+        except:
+            off_track_lap_number = None
+
+        try:
+            off_track_time = str(match.group("time"))
+            # Combine UTC time with session date to get accurate time of track limit violation
+            date = self.session_start.combine(
+                date=self.session_start.date(),
+                time=datetime.strptime(off_track_time, "%H:%M:%S").time(),
+                tzinfo=self.session_start.tzinfo
+            )
+        except:
+            date = None
+
+        details = {
+            "lap_number": off_track_lap_number if off_track_lap_number is not None else lap_number, # Note: lap number for qualifying incidents is individual to driver
+            "marker": off_track_marker,
+            "message": race_control_message,
+            "driver_roles": {off_track_driver_number: "initiator"}
+        }
+
+        yield Event(
+            meeting_key=self.meeting_key,
+            session_key=self.session_key,
+            date=date,
+            elapsed_time=date - self.session_start if date is not None else None,
+            category=EventCategory.DRIVER_ACTION,
+            cause=EventCause.OFF_TRACK,
+            details=details
+        )
+    
+
+    def _process_out(self, message: Message) -> Iterator[Event]:
+        for driver_number, data in message.content.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+
+            if not isinstance(data, dict):
+                continue
+
+            if not "IsOut" in data:
+                continue
+
+            details = {
+                "lap_number": self.lap_number,
+                "marker": {
+                    "x": self.driver_positions.get(driver_number, {}).get("x"),
+                    "y": self.driver_positions.get(driver_number, {}).get("y"),
+                    "z": self.driver_positions.get(driver_number, {}).get("z")
+                },
+                "driver_roles": {driver_number: "initiator"}
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                elapsed_time=message.timepoint - self.session_start,
+                category=EventCategory.DRIVER_ACTION,
+                cause=EventCause.OUT,
+                details=details
+            )
+        
+
+    def _process_overtake(self, message: Message) -> Iterator[Event]:
+        # Separate overtaking driver from overtaken drivers
+        # Overtake state 2 indicates that the driver is the one overtaking, all other drivers are being overtaken
+        overtaking_driver_number = next(
+            (driver_number for driver_number, data in message.content.items()
+                if isinstance(driver_number, int) and isinstance(data, dict) and data.get("OvertakeState") == 2
+            ),
+            None
+        )
+        overtaken_driver_numbers = [driver_number for driver_number, data in message.content.items()
+            if isinstance(driver_number, int) and isinstance(data, dict) and data.get("OvertakeState") != 2
+        ]
+
+        if overtaking_driver_number is None or len(overtaken_driver_numbers) == 0:
+            # Need at least two drivers to have an overtake
+            return
+        
+        driver_roles = {
+            **{overtaking_driver_number: "initiator"},
+            **{driver_number: "participant" for driver_number in overtaken_driver_numbers}
+        }
+        
+        details = {
+            "lap_number": self.lap_number,
+            "marker": {
+                "x": self.driver_positions.get(overtaking_driver_number, {}).get("x"),
+                "y": self.driver_positions.get(overtaking_driver_number, {}).get("y"),
+                "z": self.driver_positions.get(overtaking_driver_number, {}).get("z")
+            },
+            "driver_roles": driver_roles
+        }
+
+        yield Event(
+            meeting_key=self.meeting_key,
+            session_key=self.session_key,
+            date=message.timepoint,
+            elapsed_time=message.timepoint - self.session_start,
+            category=EventCategory.DRIVER_ACTION,
+            cause=EventCause.OVERTAKE,
+            details=details
+        )
+    
+
+    def _process_pit(self, message: Message) -> Iterator[Event]:
+        # Use stint information to determine if a pit has occurred since pit information arrives before corresponding stint information
+        # driver_pits should already be updated at this point
+        stints = deep_get(obj=message.content, key="Lines")
+        
+        if not isinstance(stints, dict):
+            return
+        
+        for driver_number, data in stints.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+            
+            if not isinstance(data, dict):
+                continue
+
+            driver_stints = deep_get(obj=data, key="Stints")
+
+            if not isinstance(driver_stints, dict) or len(driver_stints.keys() == 0):
+                continue
+            
+            latest_stint_number = max(driver_stints.keys(), key=lambda stint_number: int(stint_number))
+            latest_stint_data = driver_stints.get(latest_stint_number)
+
+            if not isinstance(latest_stint_data, dict):
+                continue
+        
+            if not "Compound" in latest_stint_data or not "TotalLaps" in latest_stint_data:
+                continue
+
+            details = {
+                "lap_number": self.lap_number,
+                "driver_roles": {driver_number: "initiator"},
+                "compound": self.driver_stints.get(driver_number, {}).get("compound"),
+                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
+                "pit_duration": self.driver_pits.get(driver_number, {}).get("pit_duration")
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                elapsed_time=message.timepoint - self.session_start,
+                category=EventCategory.DRIVER_ACTION,
+                cause=EventCause.PIT,
+                details=details
+            )
+    
+
+    def _process_incident_verdict(self, message: Message) -> Iterator[Event]:
+        race_control_message = deep_get(obj=message.content, key="Message")
+
+        if not isinstance(race_control_message, str):
+            return
+        
+        try:
+            lap_number = int(deep_get(obj=message.content, key="Lap"))
+        except:
+            return
+        
+        # Extract incident verdict information from race control message
+        # We need two patterns as penalty verdicts differ from others in structure
+        incident_verdict_pattern = (
+            r"^"
+            r"(?:FIA\s+STEWARDS:\s+)?"
+            r"(?:(?P<marker>[A-Z0-9/\s]+?)\s+)?"                                                        # Captures marker if it exists
+            r"(?:LAP\s+(?P<lap_number>\d+)\s+)?"                                                        # Captures lap number if it exists
+            r"INCIDENT"
+            r"(?:\s+INVOLVING\s+CARS?\s+(?P<driver_numbers>(?:\d+\s+\(\w+\)(?:\s*,\s*|\s+AND\s+)?)+))?" # Captures driver numbers if they exist
+            r"\s+"
+            r"(?P<verdict>[^-]+?)"                                                                      # Captures verdict
+            r"(?:\s*-\s*(?P<reason>.+))?"                                                               # Captures reason if it exists
+            r"$"
+        )
+
+        penalty_verdict_pattern = (
+            r"^"
+            r"(?:FIA\s+STEWARDS:\s+)?"
+            r"(?P<verdict>.+?)"                                                                         # Captures verdict
+            r"\s+FOR\s+CAR\s+"
+            r"(?P<driver_number>\d+)\s+\(\w+\)"                                                         # Captures driver number
+            r"(?:\s*-\s*(?P<reason>.+))?"                                                               # Captures reason if it exists
+            r"$"
+        )
+
+        match = re.search(pattern=incident_verdict_pattern, string=race_control_message)
+
+        if match is not None:
+            try:
+                incident_verdict_marker = str(match.group("marker"))
+            except:
+                incident_verdict_marker = None
+
+            try:
+                incident_verdict_lap_number = int(match.group("lap_number"))
+            except:
+                incident_verdict_lap_number = None
+            
+            try:
+                incident_verdict_driver_numbers = [int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))]
+            except:
+                incident_verdict_driver_numbers = None
+
+            try:
+                incident_verdict = str(match.group("verdict"))
+            except:
+                incident_verdict = None
+
+            try:
+                incident_verdict_reason = str(match.group("reason"))
+            except:
+                incident_verdict_reason = None
+            
+            if incident_verdict_driver_numbers is None:
+                # Incident does not specify drivers
+                    driver_roles = None
+            elif len(incident_verdict_driver_numbers) >= 2 and incident_verdict_marker is not None:
+                # Incident is between drivers, with the first listed driver at fault
+                initiator_driver_number = incident_verdict_driver_numbers[0]
+                participant_driver_numbers = incident_verdict_driver_numbers[1::]
+
+                driver_roles = {
+                    **{initiator_driver_number: "initiator"},
+                    **{driver_number: "participant" for driver_number in participant_driver_numbers}
+                }
+            else:
+                # Incident is not between drivers
+                driver_roles = {driver_number: "initiator" for driver_number in incident_verdict_driver_numbers}
+
+            details = {
+                "lap_number": incident_verdict_lap_number if incident_verdict_lap_number is not None else lap_number,
+                "marker": incident_verdict_marker,
+                "verdict": incident_verdict,
+                "reason": incident_verdict_reason,
+                "message": race_control_message,
+                "driver_roles": driver_roles
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                elapsed_time=message.timepoint - self.session_start,
+                category=EventCategory.DRIVER_NOTIFICATION,
+                cause=EventCause.INCIDENT_VERDICT,
+                details=details
+            )
+        else:
+            match = re.search(pattern=penalty_verdict_pattern, string=race_control_message)
+
+            try:
+                incident_verdict = str(match.group("verdict"))
+            except:
+                incident_verdict = None
+            
+            try:
+                incident_verdict_driver_number = int(match.group("driver_number"))
+            except:
+                incident_verdict_driver_number = None
+
+            try:
+                incident_verdict_reason = str(match.group("reason"))
+            except:
+                incident_verdict_reason = None
+            
+            details = {
+                "verdict": incident_verdict,
+                "reason": incident_verdict_reason,
+                "message": race_control_message,
+                "driver_roles": {incident_verdict_driver_number: "initiator"}
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                elapsed_time=message.timepoint - self.session_start,
+                category=EventCategory.DRIVER_NOTIFICATION,
+                cause=EventCause.INCIDENT_VERDICT,
+                details=details
+            )
+    
+
+    def _process_driver_flag(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
+        try:
+            race_control_message = str(deep_get(obj=message.content, key="Message"))
+        except:
+            race_control_message = None
+        
+        try:
+            date = to_datetime(deep_get(obj=message.content, key="Utc"))
+            date = pytz.utc.localize(date)
+        except:
+            date = None
+
+        try:
+            lap_number = int(deep_get(obj=message.content, key="Lap"))
+        except:
+            lap_number = None
+
+        try:
+            driver_number = int(deep_get(obj=message.content, key="RacingNumber"))
+        except:
+            driver_number = None
+        
+        # Black flags do not have "RacingNumber" field, need to extract driver number from race control message
+        if driver_number is None and race_control_message is not None:
+            driver_flag_pattern = r"CAR (?P<driver_number>\d+)"
+            match = re.search(pattern=driver_flag_pattern, string=race_control_message)
+
+            try:
+                driver_number = int(match.group("driver_number"))
+            except:
+                driver_number = None
+
+        details = {
+            "lap_number": lap_number,
+            "message": race_control_message,
+            "driver_roles": {driver_number: "initiator"} if driver_number is not None else None
+        }
+
+        yield Event(
+            meeting_key=self.meeting_key,
+            session_key=self.session_key,
+            date=date,
+            elapsed_time=date - self.session_start if date is not None else None,
+            category=EventCategory.DRIVER_NOTIFICATION,
+            cause=event_cause,
+            details=details
+        )
+    
+
+    def _process_sector_flag(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
+        race_control_message = deep_get(obj=message.content, key="Message")
+
+        if not isinstance(race_control_message, str):
+            return
+
+        try:
+            date = to_datetime(deep_get(obj=message.content, key="Utc"))
+            date = pytz.utc.localize(date)
+        except:
+            date = None
+
+        try:
+            lap_number = int(deep_get(obj=message.content, key="Lap"))
+        except:
+            lap_number = None
+        
+        # Extract sector from race control message
+
+        sector_pattern = r"(?P<marker>SECTOR\s+\d+)"
+        match = re.search(pattern=sector_pattern, string=race_control_message)
+
+        try:
+            sector_marker = str(match.group("marker"))
+        except:
+            sector_marker = None
+        
+        details = {
+            "lap_number": lap_number,
+            "marker": sector_marker,
+            "message": race_control_message
+        }
+
+        yield Event(
+            meeting_key=self.meeting_key,
+            session_key=self.session_key,
+            date=date,
+            elapsed_time=date - self.session_start if date is not None else None,
+            category=EventCategory.SECTOR_NOTIFICATION,
+            cause=event_cause,
+            details=details
+        )
+    
+
+    def _process_track_flag(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
+        try:
+            race_control_message = str(deep_get(obj=message.content, key="Message"))
+        except:
+            race_control_message = None
+
+        try:
+            date = to_datetime(deep_get(obj=message.content, key="Utc"))
+            date = pytz.utc.localize(date)
+        except:
+            date = None
+
+        try:
+            lap_number = int(deep_get(obj=message.content, key="Lap"))
+        except:
+            lap_number = None
+        
+        details = {
+            "lap_number": lap_number,
+            "message": race_control_message
+        }
+
+        yield Event(
+            meeting_key=self.meeting_key,
+            session_key=self.session_key,
+            date=date,
+            elapsed_time=date - self.session_start if date is not None else None,
+            category=EventCategory.TRACK_NOTIFICATION,
+            cause=event_cause,
+            details=details
+        )
+    
+
+    def _process_qualifying_part_start(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
+        yield Event(
+            meeting_key=self.meeting_key,
+            session_key=self.session_key,
+            date=message.timepoint,
+            elapsed_time=message.timepoint - self.session_start,
+            category=EventCategory.TRACK_NOTIFICATION,
+            cause=event_cause,
+            details=None
+        )
+
+
+    # Maps event causes to unique conditions that determine if event messages belong to that cause
+    # message should be of type Message
+    def _get_event_condition_map(self) -> dict[EventCause, Callable[..., bool]]:
+        return {
+            EventCause.HOTLAP: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingData",
+                lambda: self.session_type == ("Practice" or "Qualifying"),
+                lambda: deep_get(obj=message.content, key="Position") is not None,
+                lambda: deep_get(obj=message.content, key="BestLapTime") is not None
+            ]),
+            EventCause.INCIDENT: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Message"),
+                lambda: "INCIDENT" in deep_get(obj=message.content, key="Message"),
+                lambda: "NOTED" in deep_get(obj=message.content, key="Message")
+            ]),
+            EventCause.OFF_TRACK: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: "TRACK LIMITS" in deep_get(obj=message.content, key="Message")
+            ]),
+            EventCause.OUT: lambda message: all(cond() for cond in [
+                lambda: message.topic == "DriverRaceInfo",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="IsOut") is not None
+            ]),
+            EventCause.OVERTAKE: lambda message: all(cond() for cond in [
+                lambda: message.topic == "DriverRaceInfo",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="OvertakeState") is not None,
+                lambda: deep_get(obj=message.content, key="Position") is not None
+            ]),
+            EventCause.PIT: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingAppData",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="Compound") is not None,
+                lambda: deep_get(obj=message.content, key="New") is not None,
+                lambda: deep_get(obj=message.content, key="TotalLaps") is not None
+            ]),
+
+            EventCause.BLACK_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Message") is not None, # Check that message is not None to avoid TypeError when searching for substring
+                lambda: "BLACK" in deep_get(obj=message.content, key="Message")
+            ]), # Black flags do not have a "Flag" field
+            EventCause.BLACK_AND_ORANGE_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: "BLACK AND ORANGE" in deep_get(obj=message.content, key="Message")
+            ]),
+            EventCause.BLACK_AND_WHITE_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: "BLACK AND WHITE" in deep_get(obj=message.content, key="Message")
+            ]),
+            EventCause.BLUE_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Flag") == "BLUE"
+            ]),
+            EventCause.INCIDENT_VERDICT: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: "FIA STEWARDS" in deep_get(obj=message.content, key="Message"),
+                lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message"), # "UNDER INVESTIGATION" is not a verdict
+                lambda: "WILL BE INVESTIGATED AFTER THE RACE" not in deep_get(obj=message.content, key="Message"), # "WILL BE INVESTIGATED AFTER THE RACE" is not a verdict
+                lambda: "WILL BE INVESTIGATED AFTER THE SESSION" not in deep_get(obj=message.content, key="Message") # "WILL BE INVESTIGATED AFTER THE SESSION" is not a verdict
+            ]),
+
+            EventCause.GREEN_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages"
+            ]) and any(cond() for cond in [
+                lambda: deep_get(obj=message.content, key="Flag") == "GREEN",
+                lambda: deep_get(obj=message.content, key="Flag") == "CLEAR",
+            ]),
+            EventCause.YELLOW_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Flag") == "YELLOW"
+            ]),
+            EventCause.DOUBLE_YELLOW_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Flag") == "DOUBLE YELLOW"
+            ]),
+            
+            EventCause.CHEQUERED_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Flag") == "CHEQUERED"
+            ]),
+            EventCause.RED_FLAG: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: deep_get(obj=message.content, key="Flag") == "RED"
+            ]),
+            EventCause.SAFETY_CAR_DEPLOYED: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="Category") == "SafetyCar",
+                lambda: deep_get(obj=message.content, key="Mode") == "SAFETY CAR",
+                lambda: deep_get(obj=message.content, key="Status") == "DEPLOYED"
+            ]),
+            EventCause.VIRTUAL_SAFETY_CAR_DEPLOYED: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="Category") == "SafetyCar",
+                lambda: deep_get(obj=message.content, key="Mode") == "VIRTUAL SAFETY CAR",
+                lambda: deep_get(obj=message.content, key="Status") == "DEPLOYED"
+            ]),
+            EventCause.SAFETY_CAR_ENDING: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="Category") == "SafetyCar",
+                lambda: deep_get(obj=message.content, key="Mode") == "SAFETY CAR",
+                lambda: deep_get(obj=message.content, key="Status") == "IN THIS LAP"
+            ]),
+            EventCause.VIRTUAL_SAFETY_CAR_ENDING: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_type == "Race",
+                lambda: deep_get(obj=message.content, key="Category") == "SafetyCar",
+                lambda: deep_get(obj=message.content, key="Mode") == "VIRTUAL SAFETY CAR",
+                lambda: deep_get(obj=message.content, key="Status") == "ENDING"
+            ]),
+            EventCause.Q1_START: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingData",
+                lambda: self.session_type == "Qualifying",
+                lambda: deep_get(obj=message.content, key="SessionPart") == 1
+            ]),
+            EventCause.Q2_START: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingData",
+                lambda: self.session_type == "Qualifying",
+                lambda: deep_get(obj=message.content, key="SessionPart") == 2
+            ]),
+            EventCause.Q3_START: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingData",
+                lambda: self.session_type == "Qualifying",
+                lambda: deep_get(obj=message.content, key="SessionPart") == 3
+            ])
+        }
+
+    
+    # Maps event causes to specific processing logic
+    # message should be of type Message
+    def _get_event_processing_map(self) -> dict[EventCause, Callable[..., Iterator[Event]]]:
+        return {
+            EventCause.HOTLAP: lambda message: self._process_hotlap(message),
+            EventCause.INCIDENT: lambda message: self._process_incident(message),
+            EventCause.OFF_TRACK: lambda message: self._process_off_track(message),
+            EventCause.OUT: lambda message: self._process_out(message),
+            EventCause.OVERTAKE: lambda message: self._process_overtake(message),
+            EventCause.PIT: lambda message: self._process_pit(message),
+            
+            EventCause.BLACK_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_FLAG),
+            EventCause.BLACK_AND_ORANGE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_AND_ORANGE_FLAG),
+            EventCause.BLACK_AND_WHITE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_AND_WHITE_FLAG),
+            EventCause.BLUE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLUE_FLAG),
+            EventCause.INCIDENT_VERDICT: lambda message: self._process_incident_verdict(message),
+
+            EventCause.GREEN_FLAG: (
+                lambda message: self._process_sector_flag(message=message, event_cause=EventCause.GREEN_FLAG) 
+                if deep_get(obj=message.content, key="Scope") is not None and deep_get(obj=message.content, key="Scope") == "Sector"
+                else self._process_track_flag(message=message, event_cause=EventCause.GREEN_FLAG)
+            ),
+            EventCause.YELLOW_FLAG: lambda message: self._process_sector_flag(message=message, event_cause=EventCause.YELLOW_FLAG),
+            EventCause.DOUBLE_YELLOW_FLAG: lambda message: self._process_sector_flag(message=message, event_cause=EventCause.DOUBLE_YELLOW_FLAG),
+
+            EventCause.CHEQUERED_FLAG: lambda message: self._process_track_flag(message=message, event_cause=EventCause.CHEQUERED_FLAG),
+            EventCause.RED_FLAG: lambda message: self._process_track_flag(message=message, event_cause=EventCause.RED_FLAG),
+            EventCause.SAFETY_CAR_DEPLOYED: lambda message: self._process_track_flag(message=message, event_cause=EventCause.SAFETY_CAR_DEPLOYED),
+            EventCause.VIRTUAL_SAFETY_CAR_DEPLOYED: lambda message: self._process_track_flag(message=message, event_cause=EventCause.VIRTUAL_SAFETY_CAR_DEPLOYED),
+            EventCause.SAFETY_CAR_ENDING: lambda message: self._process_track_flag(message=message, event_cause=EventCause.SAFETY_CAR_ENDING),
+            EventCause.VIRTUAL_SAFETY_CAR_ENDING: lambda message: self._process_track_flag(message=message, event_cause=EventCause.VIRTUAL_SAFETY_CAR_ENDING),
+            EventCause.Q1_START: lambda message: self._process_qualifying_part_start(message=message, event_cause=EventCause.Q1_START),
+            EventCause.Q2_START: lambda message: self._process_qualifying_part_start(message=message, event_cause=EventCause.Q2_START),
+            EventCause.Q3_START: lambda message: self._process_qualifying_part_start(message=message, event_cause=EventCause.Q3_START)
+        }
+
+
+    def process_message(self, message: Message) -> Iterator[Event]:
+        match (message.topic):
+            case "LapCount":
+                self._update_lap_number(message)
+            case "PitLaneTimeCollection":
+                self._update_driver_pits(message)
+            case "Position.z":
+                self._update_driver_positions(message)
+            case "SessionInfo":
+                self._update_session_info(message)
+            case "TimingAppData":
+                self._update_driver_stints(message)
+            case _:
+                pass
+            
+        # Find event cause corresponding to message
+        event_cause = next(
+            (event_cause for event_cause, cond in self._get_event_condition_map().items()
+                if cond(message.content)
+            ),
+            None
+        )
+
+        if event_cause is None:
+            # Not an event message
+            return
+        
+        yield from self._get_event_processing_map().get(event_cause)(message)
+
+        
