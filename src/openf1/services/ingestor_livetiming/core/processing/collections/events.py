@@ -276,7 +276,7 @@ class EventsCollection(Collection):
 
             driver_stints = deep_get(obj=data, key="Stints")
 
-            if not isinstance(driver_stints, dict) or len(driver_stints.keys() == 0):
+            if not isinstance(driver_stints, dict) or len(driver_stints.keys()) == 0:
                 continue
             
             latest_stint_number = max(driver_stints.keys(), key=lambda stint_number: int(stint_number))
@@ -399,8 +399,8 @@ class EventsCollection(Collection):
                 session_key=self.session_key,
                 date=message.timepoint,
                 elapsed_time=message.timepoint - self.session_start,
-                category=EventCategory.DRIVER_ACTION,
-                cause=EventCause.HOTLAP,
+                category=EventCategory.DRIVER_ACTION.value,
+                cause=EventCause.HOTLAP.value,
                 details=details
             )
     
@@ -488,8 +488,8 @@ class EventsCollection(Collection):
             session_key=self.session_key,
             date=date,
             elapsed_time=date - self.session_start if date is not None else None,
-            category=EventCategory.DRIVER_ACTION,
-            cause=EventCause.INCIDENT,
+            category=EventCategory.DRIVER_ACTION.value,
+            cause=EventCause.INCIDENT.value,
             details=details
         )
     
@@ -554,8 +554,8 @@ class EventsCollection(Collection):
             session_key=self.session_key,
             date=date,
             elapsed_time=date - self.session_start if date is not None else None,
-            category=EventCategory.DRIVER_ACTION,
-            cause=EventCause.OFF_TRACK,
+            category=EventCategory.DRIVER_ACTION.value,
+            cause=EventCause.OFF_TRACK.value,
             details=details
         )
     
@@ -588,8 +588,8 @@ class EventsCollection(Collection):
                 session_key=self.session_key,
                 date=message.timepoint,
                 elapsed_time=message.timepoint - self.session_start,
-                category=EventCategory.DRIVER_ACTION,
-                cause=EventCause.OUT,
+                category=EventCategory.DRIVER_ACTION.value,
+                cause=EventCause.OUT.value,
                 details=details
             )
         
@@ -631,8 +631,8 @@ class EventsCollection(Collection):
             session_key=self.session_key,
             date=message.timepoint,
             elapsed_time=message.timepoint - self.session_start,
-            category=EventCategory.DRIVER_ACTION,
-            cause=EventCause.OVERTAKE,
+            category=EventCategory.DRIVER_ACTION.value,
+            cause=EventCause.OVERTAKE.value,
             details=details
         )
     
@@ -656,7 +656,7 @@ class EventsCollection(Collection):
 
             driver_stints = deep_get(obj=data, key="Stints")
 
-            if not isinstance(driver_stints, dict) or len(driver_stints.keys() == 0):
+            if not isinstance(driver_stints, dict) or len(driver_stints.keys()) == 0:
                 continue
             
             latest_stint_number = max(driver_stints.keys(), key=lambda stint_number: int(stint_number))
@@ -681,8 +681,8 @@ class EventsCollection(Collection):
                 session_key=self.session_key,
                 date=message.timepoint,
                 elapsed_time=message.timepoint - self.session_start,
-                category=EventCategory.DRIVER_ACTION,
-                cause=EventCause.PIT,
+                category=EventCategory.DRIVER_ACTION.value,
+                cause=EventCause.PIT.value,
                 details=details
             )
     
@@ -781,8 +781,8 @@ class EventsCollection(Collection):
                 session_key=self.session_key,
                 date=message.timepoint,
                 elapsed_time=message.timepoint - self.session_start,
-                category=EventCategory.DRIVER_NOTIFICATION,
-                cause=EventCause.INCIDENT_VERDICT,
+                category=EventCategory.DRIVER_NOTIFICATION.value,
+                cause=EventCause.INCIDENT_VERDICT.value,
                 details=details
             )
         else:
@@ -815,8 +815,8 @@ class EventsCollection(Collection):
                 session_key=self.session_key,
                 date=message.timepoint,
                 elapsed_time=message.timepoint - self.session_start,
-                category=EventCategory.DRIVER_NOTIFICATION,
-                cause=EventCause.INCIDENT_VERDICT,
+                category=EventCategory.DRIVER_NOTIFICATION.value,
+                cause=EventCause.INCIDENT_VERDICT.value,
                 details=details
             )
     
@@ -864,8 +864,8 @@ class EventsCollection(Collection):
             session_key=self.session_key,
             date=date,
             elapsed_time=date - self.session_start if date is not None else None,
-            category=EventCategory.DRIVER_NOTIFICATION,
-            cause=event_cause,
+            category=EventCategory.DRIVER_NOTIFICATION.value,
+            cause=event_cause.value,
             details=details
         )
     
@@ -908,8 +908,8 @@ class EventsCollection(Collection):
             session_key=self.session_key,
             date=date,
             elapsed_time=date - self.session_start if date is not None else None,
-            category=EventCategory.SECTOR_NOTIFICATION,
-            cause=event_cause,
+            category=EventCategory.SECTOR_NOTIFICATION.value,
+            cause=event_cause.value,
             details=details
         )
     
@@ -941,8 +941,8 @@ class EventsCollection(Collection):
             session_key=self.session_key,
             date=date,
             elapsed_time=date - self.session_start if date is not None else None,
-            category=EventCategory.TRACK_NOTIFICATION,
-            cause=event_cause,
+            category=EventCategory.TRACK_NOTIFICATION.value,
+            cause=event_cause.value,
             details=details
         )
     
@@ -953,8 +953,8 @@ class EventsCollection(Collection):
             session_key=self.session_key,
             date=message.timepoint,
             elapsed_time=message.timepoint - self.session_start,
-            category=EventCategory.TRACK_NOTIFICATION,
-            cause=event_cause,
+            category=EventCategory.TRACK_NOTIFICATION.value,
+            cause=event_cause.value,
             details=None
         )
 
