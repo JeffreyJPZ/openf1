@@ -127,7 +127,6 @@ class Event(Document):
     meeting_key: int
     session_key: int
     date: datetime
-    elapsed_time: timedelta
     category: str
     cause: str
     details: EventDetails
@@ -398,7 +397,6 @@ class EventsCollection(Collection):
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
                 date=message.timepoint,
-                elapsed_time=message.timepoint - self.session_start,
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.HOTLAP.value,
                 details=details
@@ -487,7 +485,6 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
-            elapsed_time=date - self.session_start if date is not None else None,
             category=EventCategory.DRIVER_ACTION.value,
             cause=EventCause.INCIDENT.value,
             details=details
@@ -553,7 +550,6 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
-            elapsed_time=date - self.session_start if date is not None else None,
             category=EventCategory.DRIVER_ACTION.value,
             cause=EventCause.OFF_TRACK.value,
             details=details
@@ -587,7 +583,6 @@ class EventsCollection(Collection):
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
                 date=message.timepoint,
-                elapsed_time=message.timepoint - self.session_start,
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.OUT.value,
                 details=details
@@ -630,7 +625,6 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=message.timepoint,
-            elapsed_time=message.timepoint - self.session_start,
             category=EventCategory.DRIVER_ACTION.value,
             cause=EventCause.OVERTAKE.value,
             details=details
@@ -680,7 +674,6 @@ class EventsCollection(Collection):
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
                 date=message.timepoint,
-                elapsed_time=message.timepoint - self.session_start,
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.PIT.value,
                 details=details
@@ -780,7 +773,6 @@ class EventsCollection(Collection):
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
                 date=message.timepoint,
-                elapsed_time=message.timepoint - self.session_start,
                 category=EventCategory.DRIVER_NOTIFICATION.value,
                 cause=EventCause.INCIDENT_VERDICT.value,
                 details=details
@@ -814,7 +806,6 @@ class EventsCollection(Collection):
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
                 date=message.timepoint,
-                elapsed_time=message.timepoint - self.session_start,
                 category=EventCategory.DRIVER_NOTIFICATION.value,
                 cause=EventCause.INCIDENT_VERDICT.value,
                 details=details
@@ -863,7 +854,6 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
-            elapsed_time=date - self.session_start if date is not None else None,
             category=EventCategory.DRIVER_NOTIFICATION.value,
             cause=event_cause.value,
             details=details
@@ -907,7 +897,6 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
-            elapsed_time=date - self.session_start if date is not None else None,
             category=EventCategory.SECTOR_NOTIFICATION.value,
             cause=event_cause.value,
             details=details
@@ -940,7 +929,6 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
-            elapsed_time=date - self.session_start if date is not None else None,
             category=EventCategory.TRACK_NOTIFICATION.value,
             cause=event_cause.value,
             details=details
@@ -952,7 +940,6 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=message.timepoint,
-            elapsed_time=message.timepoint - self.session_start,
             category=EventCategory.TRACK_NOTIFICATION.value,
             cause=event_cause.value,
             details=None
