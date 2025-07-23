@@ -125,6 +125,7 @@ class Event(Document):
         return (self.date, self.cause)
 
 
+@dataclass
 class EventsCollection(Collection):
     name = "events"
     source_topics = {
