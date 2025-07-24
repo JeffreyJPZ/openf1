@@ -180,12 +180,15 @@ class EventsCollection(Collection):
             gmt_offset = str(deep_get(obj=message.content, key="GmtOffset"))
 
             add_timezone_info(dt=session_start, gmt_offset=gmt_offset)
-
+        except:
+            return
+        
+        try:
             session_type = str(deep_get(obj=message.content, key="Type"))
         except:
             return
         
-        self.session_start = message.timepoint
+        self.session_start = session_start
         self.session_type = session_type
 
 
@@ -527,7 +530,7 @@ class EventsCollection(Collection):
         try:
             off_track_time = str(match.group("time"))
             # Track limit violation time is local, need to convert to UTC
-            date = self.session_start.combine(
+            date = datetime.combine(
                 date=self.session_start.date(),
                 time=datetime.strptime(off_track_time, "%H:%M:%S").time(),
                 tzinfo=self.session_start.tzinfo
