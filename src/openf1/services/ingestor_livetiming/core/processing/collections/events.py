@@ -632,6 +632,7 @@ class EventsCollection(Collection):
                 "y": self.driver_positions[overtaking_driver_number]["y"],
                 "z": self.driver_positions[overtaking_driver_number]["z"]
             },
+            "position": overtake_position,
             "driver_roles": driver_roles
         }
 
