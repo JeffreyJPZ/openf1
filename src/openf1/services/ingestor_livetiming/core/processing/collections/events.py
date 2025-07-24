@@ -12,7 +12,7 @@ from openf1.services.ingestor_livetiming.core.objects import (
     Document,
     Message,
 )
-from openf1.util.misc import deep_get, to_datetime, to_timedelta
+from openf1.util.misc import deep_get, to_datetime, to_timedelta, add_timezone_info
     
 
 class EventCategory(str, Enum):
@@ -133,7 +133,14 @@ class Event(Document):
     
     @property
     def unique_key(self) -> tuple:
-        return (self.date, self.cause)
+        return (
+            self.meeting_key,
+            self.session_key,
+            self.date,
+            self.category,
+            self.cause,
+            self.details
+        )
 
 
 @dataclass
@@ -151,7 +158,7 @@ class EventsCollection(Collection):
     }
     
     # Since messages are sorted by timepoint and then by topic we only need to keep the most recent data from other topics?
-    session_start: datetime = field(default=None) # NOTE: this is not the start date of the session, but the start date when messages begin appearing
+    session_start: datetime = field(default=None)
     session_type: Literal["Practice", "Qualifying", "Race"] = field(default=None)
     lap_number: int = field(default=None)
     driver_positions: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(dict))
@@ -173,6 +180,11 @@ class EventsCollection(Collection):
     def _update_session_info(self, message: Message):
         # Update session start and type
         try:
+            session_start = to_datetime(str(deep_get(obj=message.content, key="StartDate")))
+            gmt_offset = str(deep_get(obj=message.content, key="GmtOffset"))
+
+            add_timezone_info(dt=session_start, gmt_offset=gmt_offset)
+
             session_type = str(deep_get(obj=message.content, key="Type"))
         except:
             return
@@ -376,8 +388,8 @@ class EventsCollection(Collection):
             details: EventDetails = {
                 "driver_role": {f"{driver_number}": "initiator"},
                 "position": position,
-                "compound": self.driver_stints[driver_number]["compound"],
-                "tyre_age_at_start": self.driver_stints[driver_number]["tyre_age_at_start"],
+                "compound": self.driver_stints.get(driver_number, {}).get("compound"),
+                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
                 "lap_duration": lap_time
             }
 
@@ -436,7 +448,7 @@ class EventsCollection(Collection):
         try:
             incident_driver_numbers = [int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))]
         except:
-            incident_driver_numbers = None
+            incident_driver_numbers = []
 
         try:
             incident_reason = str(match.group("incident_reason"))
@@ -445,7 +457,7 @@ class EventsCollection(Collection):
         
         # Assume incidents between drivers specify a location and incidents between two or more drivers have driver at fault listed first,
         # since penalties can only be given if one driver is wholly or predominantly at fault?
-        if incident_driver_numbers is None:
+        if len(incident_driver_numbers) == 0:
             # Incident does not specify drivers
             driver_roles = None
         elif len(incident_driver_numbers) >= 2 and incident_marker is not None:
@@ -496,7 +508,7 @@ class EventsCollection(Collection):
             r"CAR\s+(?P<driver_number>\d+).*?"      # Captures driver number
             r"AT\s+(?P<marker>[A-Z0-9/\s]+)\s+"     # Captures marker
             r"LAP\s+(?P<lap_number>\d+)\s+"         # Captures lap number
-            r"(?P<time>\b\d{2}:\d{2}:\d{2}\b)"      # Captures UTC time
+            r"(?P<time>\b\d{2}:\d{2}:\d{2}\b)"      # Captures local time
             r"$"
         )
         match = re.search(pattern=off_track_pattern, string=race_control_message)
@@ -518,7 +530,7 @@ class EventsCollection(Collection):
 
         try:
             off_track_time = str(match.group("time"))
-            # Combine UTC time with session date to get accurate time of track limit violation
+            # Track limit violation time is local, need to convert to UTC
             date = self.session_start.combine(
                 date=self.session_start.date(),
                 time=datetime.strptime(off_track_time, "%H:%M:%S").time(),
@@ -528,7 +540,7 @@ class EventsCollection(Collection):
             date = None
 
         details: EventDetails = {
-            "lap_number": off_track_lap_number if off_track_lap_number is None else lap_number, # Note: lap number for qualifying incidents is individual to driver
+            "lap_number": off_track_lap_number if off_track_lap_number is None else lap_number, # Lap number for qualifying incidents is individual to driver
             "marker": off_track_marker,
             "message": race_control_message,
             "driver_roles": {f"{off_track_driver_number}": "initiator"}
@@ -554,15 +566,15 @@ class EventsCollection(Collection):
             if not isinstance(data, dict):
                 continue
 
-            if not "IsOut" in data:
+            if bool(data.get("IsOut")) is False:
                 continue
 
             details: EventDetails = {
                 "lap_number": self.lap_number,
                 "marker": {
-                    "x": self.driver_positions[driver_number]["x"],
-                    "y": self.driver_positions[driver_number]["y"],
-                    "z": self.driver_positions[driver_number]["z"]
+                    "x": self.driver_positions.get(driver_number, {}).get("x"),
+                    "y": self.driver_positions.get(driver_number, {}).get("y"),
+                    "z": self.driver_positions.get(driver_number, {}).get("z")
                 },
                 "driver_roles": {f"{driver_number}": "initiator"}
             }
@@ -580,39 +592,48 @@ class EventsCollection(Collection):
     def _process_overtake(self, message: Message) -> Iterator[Event]:
         # Separate overtaking driver from overtaken drivers
         # Overtake state 2 indicates that the driver is the one overtaking, all other drivers are being overtaken
-        overtaking_driver_number = next(
-            (driver_number for driver_number, data in message.content.items()
+        try:
+            overtaking_driver_number = int(
+                next(
+                    (driver_number for driver_number, data in message.content.items()
+                        if all([
+                            isinstance(driver_number, int),
+                            isinstance(data, dict),
+                            data.get("OvertakeState") == 2
+                        ])
+                    ),
+                    None
+                )
+            )
+        except:
+            overtaking_driver_number = None
+
+        try:
+            overtaken_driver_numbers = [int(driver_number) for driver_number, data in message.content.items()
                 if all([
                     isinstance(driver_number, int),
                     isinstance(data, dict),
-                    data.get("OvertakeState") == 2
+                    data.get("OvertakeState") != 2
                 ])
-            ),
-            None
-        )
-
-        overtaken_driver_numbers = [driver_number for driver_number, data in message.content.items()
-            if all([
-                isinstance(driver_number, int),
-                isinstance(data, dict),
-                data.get("OvertakeState") != 2
-            ])
-        ]
+            ]
+        except:
+            overtaken_driver_numbers = []
 
         # Get overtake position
         try:
-            overtake_position = next(
-                (data.get("Position") for driver_number, data in message.content.items()
-                    if all([
-                        isinstance(driver_number, int),
-                        isinstance(data, dict),
-                        data.get("OvertakeState") == 2,
-                        data.get("Position") is not None
-                    ])
-                ),
-                None
+            overtake_position = int(
+                next(
+                    (data.get("Position") for driver_number, data in message.content.items()
+                        if all([
+                            isinstance(driver_number, int),
+                            isinstance(data, dict),
+                            data.get("OvertakeState") == 2,
+                            data.get("Position") is not None
+                        ])
+                    ),
+                    None
+                )
             )
-            overtake_position = int(overtake_position)
         except:
             overtake_position = None
 
@@ -628,9 +649,9 @@ class EventsCollection(Collection):
         details: EventDetails = {
             "lap_number": self.lap_number,
             "marker": {
-                "x": self.driver_positions[overtaking_driver_number]["x"],
-                "y": self.driver_positions[overtaking_driver_number]["y"],
-                "z": self.driver_positions[overtaking_driver_number]["z"]
+                "x": self.driver_positions.get(overtaking_driver_number, {}).get("x"),
+                "y": self.driver_positions.get(overtaking_driver_number, {}).get("y"),
+                "z": self.driver_positions.get(overtaking_driver_number, {}).get("z")
             },
             "position": overtake_position,
             "driver_roles": driver_roles
@@ -678,17 +699,17 @@ class EventsCollection(Collection):
                 continue
 
             details: EventDetails = {
-                "lap_number": self.driver_pits[driver_number]["lap_number"],
+                "lap_number": self.driver_pits.get(driver_number, {}).get("lap_number"),
                 "driver_roles": {f"{driver_number}": "initiator"},
-                "compound": self.driver_stints[driver_number]["compound"],
-                "tyre_age_at_start": self.driver_stints[driver_number]["tyre_age_at_start"],
-                "pit_duration": self.driver_pits[driver_number]["pit_duration"]
+                "compound": self.driver_stints.get(driver_number, {}).get("compound"),
+                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
+                "pit_duration": self.driver_pits.get(driver_number, {}).get("pit_duration")
             }
 
             yield Event(
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
-                date=self.driver_pits[driver_number]["date"],
+                date=self.driver_pits.get(driver_number, {}).get("date"),
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.PIT.value,
                 details=details
@@ -747,7 +768,7 @@ class EventsCollection(Collection):
             try:
                 incident_verdict_driver_numbers = [int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))]
             except:
-                incident_verdict_driver_numbers = None
+                incident_verdict_driver_numbers = []
 
             try:
                 incident_verdict = str(match.group("verdict"))
@@ -759,9 +780,9 @@ class EventsCollection(Collection):
             except:
                 incident_verdict_reason = None
             
-            if incident_verdict_driver_numbers is None:
+            if len(incident_verdict_driver_numbers) == 0:
                 # Incident does not specify drivers
-                    driver_roles = None
+                driver_roles = None
             elif len(incident_verdict_driver_numbers) >= 2 and incident_verdict_marker is not None:
                 # Incident is between drivers, with the first listed driver at fault
                 initiator_driver_number = incident_verdict_driver_numbers[0]
@@ -985,7 +1006,7 @@ class EventsCollection(Collection):
             EventCause.OUT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "DriverRaceInfo",
                 lambda: self.session_type == "Race",
-                lambda: deep_get(obj=message.content, key="IsOut") is not None
+                lambda: bool(deep_get(obj=message.content, key="IsOut")) is True
             ]),
             EventCause.OVERTAKE: lambda message: all(cond() for cond in [
                 lambda: message.topic == "DriverRaceInfo",
@@ -997,7 +1018,6 @@ class EventsCollection(Collection):
                 lambda: message.topic == "TimingAppData",
                 lambda: self.session_type == "Race",
                 lambda: deep_get(obj=message.content, key="Compound") is not None,
-                lambda: deep_get(obj=message.content, key="New") is not None,
                 lambda: deep_get(obj=message.content, key="TotalLaps") is not None
             ]),
 
