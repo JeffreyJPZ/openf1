@@ -134,12 +134,8 @@ class Event(Document):
     @property
     def unique_key(self) -> tuple:
         return (
-            self.meeting_key,
-            self.session_key,
             self.date,
-            self.category,
-            self.cause,
-            self.details
+            self.cause
         )
 
 
