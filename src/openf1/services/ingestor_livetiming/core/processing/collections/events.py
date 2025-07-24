@@ -591,6 +591,14 @@ class EventsCollection(Collection):
             None
         )
 
+        overtaken_driver_numbers = [driver_number for driver_number, data in message.content.items()
+            if all([
+                isinstance(driver_number, int),
+                isinstance(data, dict),
+                data.get("OvertakeState") != 2
+            ])
+        ]
+
         # Get overtake position
         try:
             overtake_position = next(
@@ -607,14 +615,6 @@ class EventsCollection(Collection):
             overtake_position = int(overtake_position)
         except:
             overtake_position = None
-
-        overtaken_driver_numbers = [driver_number for driver_number, data in message.content.items()
-            if all([
-                isinstance(driver_number, int),
-                isinstance(data, dict),
-                data.get("OvertakeState") != 2
-            ])
-        ]
 
         if overtaking_driver_number is None or len(overtaken_driver_numbers) == 0:
             # Need at least two drivers to have an overtake
