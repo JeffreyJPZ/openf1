@@ -1,9 +1,9 @@
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Iterator, Literal, TypedDict
+from typing import Callable, Iterator, Literal, TypedDict
 
 import pytz
 
@@ -70,7 +70,7 @@ class EventDetails(TypedDict):
             - 'SECTOR 13'
             - {'x': 1000, 'y': -150, 'z': 2}
 
-    driver_roles: dict[int, Literal['initiator', 'participant']] | None
+    driver_roles: dict[str, Literal['initiator', 'participant']] | None
         Maps driver numbers to a role describing their involvement in the event:
             - 'initiator' if the driver was the main reason for the event (e.g. causing an incident)
             - 'participant' if the driver is merely involved in the event (e.g. being overtaken, being the victim of an incident).
@@ -111,7 +111,7 @@ class EventDetails(TypedDict):
     """
     lap_number: int | None
     marker: str | dict[Literal["x", "y", "z"], int] | None
-    driver_roles: dict[int, Literal["initiator", "participant"]] | None
+    driver_roles: dict[str, Literal["initiator", "participant"]] | None # Driver numbers must be kept as strings since they are part of a document
     position: int | None
     lap_duration: float | None
     verdict: str | None
@@ -369,16 +369,16 @@ class EventsCollection(Collection):
                 position = None
 
             try:
-                lap_time = to_timedelta(data.get("BestLapTime", {}).get("Value"))
+                lap_time = to_timedelta(data.get("BestLapTime", {}).get("Value")).total_seconds()
             except:
                 lap_time = None
 
             details: EventDetails = {
-                "driver_role": {driver_number: "initiator"},
+                "driver_role": {f"{driver_number}": "initiator"},
                 "position": position,
                 "compound": self.driver_stints[driver_number]["compound"],
                 "tyre_age_at_start": self.driver_stints[driver_number]["tyre_age_at_start"],
-                "lap_duration": lap_time.total_seconds()
+                "lap_duration": lap_time
             }
 
             yield Event(
@@ -454,12 +454,12 @@ class EventsCollection(Collection):
             participant_driver_numbers = incident_driver_numbers[1::]
 
             driver_roles = {
-                **{initiator_driver_number: "initiator"},
-                **{driver_number: "participant" for driver_number in participant_driver_numbers}
+                **{f"{initiator_driver_number}": "initiator"},
+                **{f"{driver_number}": "participant" for driver_number in participant_driver_numbers}
             }
         else:
             # Incident is not between drivers
-            driver_roles = {driver_number: "initiator" for driver_number in incident_driver_numbers}
+            driver_roles = {f"{driver_number}": "initiator" for driver_number in incident_driver_numbers}
 
         details: EventDetails = {
             "lap_number": incident_lap_number if incident_lap_number is not None else lap_number,
@@ -531,7 +531,7 @@ class EventsCollection(Collection):
             "lap_number": off_track_lap_number if off_track_lap_number is None else lap_number, # Note: lap number for qualifying incidents is individual to driver
             "marker": off_track_marker,
             "message": race_control_message,
-            "driver_roles": {off_track_driver_number: "initiator"}
+            "driver_roles": {f"{off_track_driver_number}": "initiator"}
         }
 
         yield Event(
@@ -564,7 +564,7 @@ class EventsCollection(Collection):
                     "y": self.driver_positions[driver_number]["y"],
                     "z": self.driver_positions[driver_number]["z"]
                 },
-                "driver_roles": {driver_number: "initiator"}
+                "driver_roles": {f"{driver_number}": "initiator"}
             }
 
             yield Event(
@@ -582,12 +582,38 @@ class EventsCollection(Collection):
         # Overtake state 2 indicates that the driver is the one overtaking, all other drivers are being overtaken
         overtaking_driver_number = next(
             (driver_number for driver_number, data in message.content.items()
-                if isinstance(driver_number, int) and isinstance(data, dict) and data.get("OvertakeState") == 2
+                if all([
+                    isinstance(driver_number, int),
+                    isinstance(data, dict),
+                    data.get("OvertakeState") == 2
+                ])
             ),
             None
         )
+
+        # Get overtake position
+        try:
+            overtake_position = next(
+                (data.get("Position") for driver_number, data in message.content.items()
+                    if all([
+                        isinstance(driver_number, int),
+                        isinstance(data, dict),
+                        data.get("OvertakeState") == 2,
+                        data.get("Position") is not None
+                    ])
+                ),
+                None
+            )
+            overtake_position = int(overtake_position)
+        except:
+            overtake_position = None
+
         overtaken_driver_numbers = [driver_number for driver_number, data in message.content.items()
-            if isinstance(driver_number, int) and isinstance(data, dict) and data.get("OvertakeState") != 2
+            if all([
+                isinstance(driver_number, int),
+                isinstance(data, dict),
+                data.get("OvertakeState") != 2
+            ])
         ]
 
         if overtaking_driver_number is None or len(overtaken_driver_numbers) == 0:
@@ -595,8 +621,8 @@ class EventsCollection(Collection):
             return
         
         driver_roles = {
-            **{overtaking_driver_number: "initiator"},
-            **{driver_number: "participant" for driver_number in overtaken_driver_numbers}
+            **{f"{overtaking_driver_number}": "initiator"},
+            **{f"{driver_number}": "participant" for driver_number in overtaken_driver_numbers}
         }
         
         details: EventDetails = {
@@ -652,7 +678,7 @@ class EventsCollection(Collection):
 
             details: EventDetails = {
                 "lap_number": self.driver_pits[driver_number]["lap_number"],
-                "driver_roles": {driver_number: "initiator"},
+                "driver_roles": {f"{driver_number}": "initiator"},
                 "compound": self.driver_stints[driver_number]["compound"],
                 "tyre_age_at_start": self.driver_stints[driver_number]["tyre_age_at_start"],
                 "pit_duration": self.driver_pits[driver_number]["pit_duration"]
@@ -741,12 +767,12 @@ class EventsCollection(Collection):
                 participant_driver_numbers = incident_verdict_driver_numbers[1::]
 
                 driver_roles = {
-                    **{initiator_driver_number: "initiator"},
-                    **{driver_number: "participant" for driver_number in participant_driver_numbers}
+                    **{f"{initiator_driver_number}": "initiator"},
+                    **{f"{driver_number}": "participant" for driver_number in participant_driver_numbers}
                 }
             else:
                 # Incident is not between drivers
-                driver_roles = {driver_number: "initiator" for driver_number in incident_verdict_driver_numbers}
+                driver_roles = {f"{driver_number}": "initiator" for driver_number in incident_verdict_driver_numbers}
 
             details: EventDetails = {
                 "lap_number": incident_verdict_lap_number if incident_verdict_lap_number is not None else lap_number,
@@ -787,7 +813,7 @@ class EventsCollection(Collection):
                 "verdict": incident_verdict,
                 "reason": incident_verdict_reason,
                 "message": race_control_message,
-                "driver_roles": {incident_verdict_driver_number: "initiator"}
+                "driver_roles": {f"{incident_verdict_driver_number}": "initiator"}
             }
 
             yield Event(
@@ -801,10 +827,10 @@ class EventsCollection(Collection):
     
 
     def _process_driver_flag(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
-        try:
-            race_control_message = str(deep_get(obj=message.content, key="Message"))
-        except:
-            race_control_message = None
+        race_control_message = deep_get(obj=message.content, key="Message")
+
+        if not isinstance(race_control_message, str):
+            return
         
         try:
             date = to_datetime(deep_get(obj=message.content, key="Utc"))
@@ -835,7 +861,7 @@ class EventsCollection(Collection):
         details: EventDetails = {
             "lap_number": lap_number,
             "message": race_control_message,
-            "driver_roles": {driver_number: "initiator"} if driver_number is not None else None
+            "driver_roles": {f"{driver_number}": "initiator"} if driver_number is not None else None
         }
 
         yield Event(
@@ -892,10 +918,10 @@ class EventsCollection(Collection):
     
 
     def _process_track_flag(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
-        try:
-            race_control_message = str(deep_get(obj=message.content, key="Message"))
-        except:
-            race_control_message = None
+        race_control_message = deep_get(obj=message.content, key="Message")
+
+        if not isinstance(race_control_message, str):
+            return
 
         try:
             date = to_datetime(deep_get(obj=message.content, key="Utc"))
