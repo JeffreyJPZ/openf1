@@ -12,7 +12,7 @@ from openf1.services.ingestor_livetiming.core.objects import (
     Document,
     Message,
 )
-from openf1.util.misc import deep_get, to_datetime, to_timedelta
+from openf1.util.misc import deep_get, to_datetime, to_timedelta, add_timezone_info
     
 
 class EventCategory(str, Enum):
@@ -151,7 +151,7 @@ class EventsCollection(Collection):
     }
     
     # Since messages are sorted by timepoint and then by topic we only need to keep the most recent data from other topics?
-    session_start: datetime = field(default=None) # NOTE: this is not the start date of the session, but the start date when messages begin appearing
+    session_start: datetime = field(default=None)
     session_type: Literal["Practice", "Qualifying", "Race"] = field(default=None)
     lap_number: int = field(default=None)
     driver_positions: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(dict))
@@ -173,6 +173,11 @@ class EventsCollection(Collection):
     def _update_session_info(self, message: Message):
         # Update session start and type
         try:
+            session_start = to_datetime(str(deep_get(obj=message.content, key="StartDate")))
+            gmt_offset = str(deep_get(obj=message.content, key="GmtOffset"))
+
+            add_timezone_info(dt=session_start, gmt_offset=gmt_offset)
+
             session_type = str(deep_get(obj=message.content, key="Type"))
         except:
             return
@@ -496,7 +501,7 @@ class EventsCollection(Collection):
             r"CAR\s+(?P<driver_number>\d+).*?"      # Captures driver number
             r"AT\s+(?P<marker>[A-Z0-9/\s]+)\s+"     # Captures marker
             r"LAP\s+(?P<lap_number>\d+)\s+"         # Captures lap number
-            r"(?P<time>\b\d{2}:\d{2}:\d{2}\b)"      # Captures UTC time
+            r"(?P<time>\b\d{2}:\d{2}:\d{2}\b)"      # Captures local time
             r"$"
         )
         match = re.search(pattern=off_track_pattern, string=race_control_message)
@@ -518,7 +523,7 @@ class EventsCollection(Collection):
 
         try:
             off_track_time = str(match.group("time"))
-            # Combine UTC time with session date to get accurate time of track limit violation
+            # Track limit violation time is local, need to convert to UTC
             date = self.session_start.combine(
                 date=self.session_start.date(),
                 time=datetime.strptime(off_track_time, "%H:%M:%S").time(),
@@ -528,7 +533,7 @@ class EventsCollection(Collection):
             date = None
 
         details: EventDetails = {
-            "lap_number": off_track_lap_number if off_track_lap_number is None else lap_number, # Note: lap number for qualifying incidents is individual to driver
+            "lap_number": off_track_lap_number if off_track_lap_number is None else lap_number, # Lap number for qualifying incidents is individual to driver
             "marker": off_track_marker,
             "message": race_control_message,
             "driver_roles": {f"{off_track_driver_number}": "initiator"}
@@ -554,7 +559,7 @@ class EventsCollection(Collection):
             if not isinstance(data, dict):
                 continue
 
-            if not "IsOut" in data:
+            if bool(data.get("IsOut")) is False:
                 continue
 
             details: EventDetails = {
@@ -985,7 +990,7 @@ class EventsCollection(Collection):
             EventCause.OUT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "DriverRaceInfo",
                 lambda: self.session_type == "Race",
-                lambda: deep_get(obj=message.content, key="IsOut") is not None
+                lambda: bool(deep_get(obj=message.content, key="IsOut")) is True
             ]),
             EventCause.OVERTAKE: lambda message: all(cond() for cond in [
                 lambda: message.topic == "DriverRaceInfo",
