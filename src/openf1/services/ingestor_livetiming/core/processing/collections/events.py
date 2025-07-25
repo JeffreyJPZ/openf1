@@ -50,9 +50,6 @@ class EventCause(str, Enum):
     VIRTUAL_SAFETY_CAR_DEPLOYED = "virtual-safety-car-deployed"
     SAFETY_CAR_ENDING = "safety-car-ending"
     VIRTUAL_SAFETY_CAR_ENDING = "virtual-safety-car-ending"
-    Q1_START = "q1-start"
-    Q2_START = "q2-start"
-    Q3_START = "q3-start"
 
 
 class EventDetails(TypedDict):
@@ -902,19 +899,6 @@ class EventsCollection(Collection):
             cause=event_cause.value,
             details=details
         )
-    
-
-    def _process_qualifying_part_start(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
-        print(f"Qualifying part start: {event_cause.value}")
-
-        yield Event(
-            meeting_key=self.meeting_key,
-            session_key=self.session_key,
-            date=message.timepoint,
-            category=EventCategory.TRACK_NOTIFICATION.value,
-            cause=event_cause.value,
-            details=None
-        )
 
 
     # Maps event causes to unique conditions that determine if event messages belong to that cause
@@ -924,9 +908,7 @@ class EventsCollection(Collection):
             EventCause.HOTLAP: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData", 
                 lambda: self.session_type in ["Practice", "Qualifying"],
-                lambda: deep_get(obj=message.content, key="SessionPart") is None, # Avoid qualifying part messages that also have the fields below
-                lambda: deep_get(obj=message.content, key="BestLapTime"),
-                lambda: deep_get(obj=message.content, key="Position")
+                lambda: deep_get(obj=message.content, key="SessionPart") is None
             ]),
             EventCause.INCIDENT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
@@ -981,9 +963,7 @@ class EventsCollection(Collection):
                 lambda: message.topic == "RaceControlMessages",
                 lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "FIA STEWARDS" in deep_get(obj=message.content, key="Message"),
-                lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message"), # "UNDER INVESTIGATION" is not a verdict
-                lambda: "WILL BE INVESTIGATED AFTER THE RACE" not in deep_get(obj=message.content, key="Message"), # "WILL BE INVESTIGATED AFTER THE RACE" is not a verdict
-                lambda: "WILL BE INVESTIGATED AFTER THE SESSION" not in deep_get(obj=message.content, key="Message") # "WILL BE INVESTIGATED AFTER THE SESSION" is not a verdict
+                lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message") # "UNDER INVESTIGATION" is not a verdict
             ]),
 
             EventCause.GREEN_FLAG: lambda message: all(cond() for cond in [
@@ -1036,21 +1016,6 @@ class EventsCollection(Collection):
                 lambda: deep_get(obj=message.content, key="Category") == "SafetyCar",
                 lambda: deep_get(obj=message.content, key="Mode") == "VIRTUAL SAFETY CAR",
                 lambda: deep_get(obj=message.content, key="Status") == "ENDING"
-            ]),
-            EventCause.Q1_START: lambda message: all(cond() for cond in [
-                lambda: message.topic == "TimingData",
-                lambda: self.session_type == "Qualifying",
-                lambda: deep_get(obj=message.content, key="SessionPart") == 1
-            ]),
-            EventCause.Q2_START: lambda message: all(cond() for cond in [
-                lambda: message.topic == "TimingData",
-                lambda: self.session_type == "Qualifying",
-                lambda: deep_get(obj=message.content, key="SessionPart") == 2
-            ]),
-            EventCause.Q3_START: lambda message: all(cond() for cond in [
-                lambda: message.topic == "TimingData",
-                lambda: self.session_type == "Qualifying",
-                lambda: deep_get(obj=message.content, key="SessionPart") == 3
             ])
         }
 
@@ -1085,10 +1050,7 @@ class EventsCollection(Collection):
             EventCause.SAFETY_CAR_DEPLOYED: lambda message: self._process_track_flag(message=message, event_cause=EventCause.SAFETY_CAR_DEPLOYED),
             EventCause.VIRTUAL_SAFETY_CAR_DEPLOYED: lambda message: self._process_track_flag(message=message, event_cause=EventCause.VIRTUAL_SAFETY_CAR_DEPLOYED),
             EventCause.SAFETY_CAR_ENDING: lambda message: self._process_track_flag(message=message, event_cause=EventCause.SAFETY_CAR_ENDING),
-            EventCause.VIRTUAL_SAFETY_CAR_ENDING: lambda message: self._process_track_flag(message=message, event_cause=EventCause.VIRTUAL_SAFETY_CAR_ENDING),
-            EventCause.Q1_START: lambda message: self._process_qualifying_part_start(message=message, event_cause=EventCause.Q1_START),
-            EventCause.Q2_START: lambda message: self._process_qualifying_part_start(message=message, event_cause=EventCause.Q2_START),
-            EventCause.Q3_START: lambda message: self._process_qualifying_part_start(message=message, event_cause=EventCause.Q3_START)
+            EventCause.VIRTUAL_SAFETY_CAR_ENDING: lambda message: self._process_track_flag(message=message, event_cause=EventCause.VIRTUAL_SAFETY_CAR_ENDING)
         }
 
 
