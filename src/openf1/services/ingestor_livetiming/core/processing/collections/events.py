@@ -579,43 +579,30 @@ class EventsCollection(Collection):
         # Separate overtaking driver from overtaken drivers
         # Overtake state 2 indicates that the driver is the one overtaking, all other drivers are being overtaken
         try:
-            overtaking_driver_number = int(
-                next(
-                    (driver_number for driver_number, data in message.content.items()
-                        if all([
-                            isinstance(data, dict),
-                            data.get("OvertakeState") == 2
-                        ])
-                    ),
-                    None
-                )
+            overtaking_driver_number = next(
+                (int(driver_number) for driver_number, data in message.content.items()
+                    if isinstance(data, dict) and data.get("OvertakeState") == 2
+                ),
+                None
             )
         except:
             overtaking_driver_number = None
 
         try:
-            overtaken_driver_numbers = [int(driver_number) for driver_number, data in message.content.items()
-                if all([
-                    isinstance(data, dict),
-                    data.get("OvertakeState") != 2
-                ])
+            overtaken_driver_numbers = [
+                int(driver_number) for driver_number, data in message.content.items()
+                    if isinstance(data, dict) and data.get("OvertakeState") != 2
             ]
         except:
             overtaken_driver_numbers = []
 
         # Get overtake position
         try:
-            overtake_position = int(
-                next(
-                    (data.get("Position") for data in message.content.values()
-                        if all([
-                            isinstance(data, dict),
-                            data.get("OvertakeState") == 2,
-                            data.get("Position") is not None
-                        ])
-                    ),
-                    None
-                )
+            overtake_position = next(
+                (int(data.get("Position")) for data in message.content.values()
+                    if isinstance(data, dict) and data.get("OvertakeState") == 2 and data.get("Position") is not None
+                ),
+                None
             )
         except:
             overtake_position = None
