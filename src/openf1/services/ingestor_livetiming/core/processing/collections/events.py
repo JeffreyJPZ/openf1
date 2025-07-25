@@ -423,7 +423,6 @@ class EventsCollection(Collection):
         
         # Extract incident information from race control message
         incident_pattern = (
-            r"^"
             r"(?:FIA\s+STEWARDS:\s+)?"
             r"(?:(?P<marker>[A-Z0-9/\s]+?)\s+)?"                                                        # Captures marker if it exists
             r"(?:LAP\s+(?P<lap_number>\d+)\s+)?"                                                        # Captures lap number if it exists
@@ -432,7 +431,6 @@ class EventsCollection(Collection):
             r"\s+"
             r"NOTED"
             r"(?:\s+-\s+(?P<reason>.+))?"                                                               # Captures incident reason if it exists
-            r"$"
         )
         match = re.search(pattern=incident_pattern, string=race_control_message)
 
@@ -494,12 +492,10 @@ class EventsCollection(Collection):
         
         # Extract track violation information from race control message
         off_track_pattern = (
-            r"^"
             r"CAR\s+(?P<driver_number>\d+).*?"      # Captures driver number
             r"AT\s+(?P<marker>[A-Z0-9/\s]+)\s+"     # Captures marker
             r"LAP\s+(?P<lap_number>\d+)\s+"         # Captures lap number
-            r"(?P<time>\b\d{2}:\d{2}:\d{2}\b)"      # Captures local time
-            r"$"
+            r"(?P<time>\b\d{1,2}:\d{2}:\d{2}\b)"    # Captures local time
         )
         match = re.search(pattern=off_track_pattern, string=race_control_message)
 
@@ -705,7 +701,6 @@ class EventsCollection(Collection):
         # Extract incident verdict information from race control message
         # We need two patterns as penalty verdicts differ from others in structure
         incident_verdict_pattern = (
-            r"^"
             r"(?:FIA\s+STEWARDS:\s+)?"
             r"(?:(?P<marker>[A-Z0-9/\s]+?)\s+)?"                                                        # Captures marker if it exists
             r"(?:LAP\s+(?P<lap_number>\d+)\s+)?"                                                        # Captures lap number if it exists
@@ -714,17 +709,14 @@ class EventsCollection(Collection):
             r"\s+"
             r"(?P<verdict>[^-]+?)"                                                                      # Captures verdict
             r"(?:\s*-\s*(?P<reason>.+))?"                                                               # Captures reason if it exists
-            r"$"
         )
 
         penalty_verdict_pattern = (
-            r"^"
             r"(?:FIA\s+STEWARDS:\s+)?"
             r"(?P<verdict>.+?)"                                                                         # Captures verdict
             r"\s+FOR\s+CAR\s+"
             r"(?P<driver_number>\d+)\s+\(\w+\)"                                                         # Captures driver number
             r"(?:\s*-\s*(?P<reason>.+))?"                                                               # Captures reason if it exists
-            r"$"
         )
 
         match = re.search(pattern=incident_verdict_pattern, string=race_control_message)
@@ -913,25 +905,6 @@ class EventsCollection(Collection):
     
 
     def _process_qualifying_part_start(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
-        data = message.content
-
-        qualifying_part_to_event_cause_map = {
-            1: EventCause.Q1_START,
-            2: EventCause.Q2_START,
-            3: EventCause.Q3_START
-        }
-
-        print("Process potential qualifying part start")
-
-        try:
-            qualifying_part = int(data.get("SessionPart"))
-            event_cause = qualifying_part_to_event_cause_map.get(qualifying_part)
-        except:
-            return
-        
-        if event_cause is None:
-            return
-        
         print(f"Qualifying part start: {event_cause.value}")
 
         yield Event(
@@ -948,22 +921,22 @@ class EventsCollection(Collection):
     # message should be of type Message
     def _get_event_condition_map(self) -> dict[EventCause, Callable[..., bool]]:
         return {
-            # TODO: why is this condition not working
             EventCause.HOTLAP: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData", 
                 lambda: self.session_type in ["Practice", "Qualifying"],
-                # lambda: deep_get(obj=message.content, key="Position") is not None,
-                # lambda: deep_get(obj=message.content, key="BestLapTime") is not None
+                lambda: deep_get(obj=message.content, key="SessionPart") is None, # Avoid qualifying part messages that also have the fields below
+                lambda: deep_get(obj=message.content, key="BestLapTime"),
+                lambda: deep_get(obj=message.content, key="Position")
             ]),
             EventCause.INCIDENT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
-                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "INCIDENT" in deep_get(obj=message.content, key="Message"),
                 lambda: "NOTED" in deep_get(obj=message.content, key="Message")
             ]),
             EventCause.OFF_TRACK: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
-                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "TRACK LIMITS" in deep_get(obj=message.content, key="Message")
             ]),
             EventCause.OUT: lambda message: all(cond() for cond in [
@@ -980,24 +953,24 @@ class EventsCollection(Collection):
             EventCause.PIT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingAppData",
                 lambda: self.session_type == "Race",
-                lambda: deep_get(obj=message.content, key="Compound") is not None,
+                lambda: isinstance(deep_get(obj=message.content, key="Compound"), str),
                 lambda: deep_get(obj=message.content, key="Compound") != "UNKNOWN",
                 lambda: deep_get(obj=message.content, key="TyresNotChanged") == "0" # TyresNotChanged being 0 indicates that pit stop is complete and tyre compound is known
             ]),
 
             EventCause.BLACK_FLAG: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
-                lambda: deep_get(obj=message.content, key="Message") is not None, # Check that message is not None to avoid TypeError when searching for substring
+                lambda: isinstance(deep_get(obj=message.content, key="Message"), str), # Check that message is a str to avoid TypeError when searching for substring
                 lambda: "BLACK" in deep_get(obj=message.content, key="Message")
             ]), # Black flags do not have a "Flag" field
             EventCause.BLACK_AND_ORANGE_FLAG: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
-                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "BLACK AND ORANGE" in deep_get(obj=message.content, key="Message")
             ]),
             EventCause.BLACK_AND_WHITE_FLAG: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
-                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "BLACK AND WHITE" in deep_get(obj=message.content, key="Message")
             ]),
             EventCause.BLUE_FLAG: lambda message: all(cond() for cond in [
@@ -1006,7 +979,7 @@ class EventsCollection(Collection):
             ]),
             EventCause.INCIDENT_VERDICT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
-                lambda: deep_get(obj=message.content, key="Message") is not None,
+                lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "FIA STEWARDS" in deep_get(obj=message.content, key="Message"),
                 lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message"), # "UNDER INVESTIGATION" is not a verdict
                 lambda: "WILL BE INVESTIGATED AFTER THE RACE" not in deep_get(obj=message.content, key="Message"), # "WILL BE INVESTIGATED AFTER THE RACE" is not a verdict
@@ -1067,17 +1040,17 @@ class EventsCollection(Collection):
             EventCause.Q1_START: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData",
                 lambda: self.session_type == "Qualifying",
-                # lambda: deep_get(obj=message.content, key="SessionPart") == 1
+                lambda: deep_get(obj=message.content, key="SessionPart") == 1
             ]),
             EventCause.Q2_START: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData",
                 lambda: self.session_type == "Qualifying",
-                # lambda: deep_get(obj=message.content, key="SessionPart") == 2
+                lambda: deep_get(obj=message.content, key="SessionPart") == 2
             ]),
             EventCause.Q3_START: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData",
                 lambda: self.session_type == "Qualifying",
-                # lambda: deep_get(obj=message.content, key="SessionPart") == 3
+                lambda: deep_get(obj=message.content, key="SessionPart") == 3
             ])
         }
 
