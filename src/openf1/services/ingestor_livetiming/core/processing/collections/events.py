@@ -1,7 +1,7 @@
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Callable, Iterator, Literal, TypedDict
 
@@ -149,12 +149,13 @@ class EventsCollection(Collection):
         "Position.z",
         "RaceControlMessages",
         "SessionInfo",
-        "TimingData",
-        "TimingAppData"
+        "TimingAppData",
+        "TimingData"
     }
     
     # Since messages are sorted by timepoint and then by topic we only need to keep the most recent data from other topics?
     session_start: datetime = field(default=None)
+    session_offset: str = field(default=None) # GMT offset
     session_type: Literal["Practice", "Qualifying", "Race"] = field(default=None)
     lap_number: int = field(default=None)
     driver_positions: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(dict))
@@ -175,20 +176,23 @@ class EventsCollection(Collection):
 
     def _update_session_info(self, message: Message):
         # Update session start and type
-        try:
-            session_start = to_datetime(str(deep_get(obj=message.content, key="StartDate")))
-            gmt_offset = str(deep_get(obj=message.content, key="GmtOffset"))
+        # Not sure why deep_get doesn't work for session info message
+        data = message.content
+        
+        gmt_offset = str(data.get("GmtOffset")) if data.get("GmtOffset") is not None else None
+        session_type = str(data.get("Type")) if data.get("Type") is not None else None
 
-            add_timezone_info(dt=session_start, gmt_offset=gmt_offset)
-        except:
+        if gmt_offset is None or session_type is None:
             return
         
         try:
-            session_type = str(deep_get(obj=message.content, key="Type"))
+            session_start = to_datetime(str(data.get("StartDate")))
+            session_start = add_timezone_info(dt=session_start, gmt_offset=gmt_offset)
         except:
             return
         
         self.session_start = session_start
+        self.session_offset = gmt_offset
         self.session_type = session_type
 
 
@@ -285,10 +289,7 @@ class EventsCollection(Collection):
             
             # Conditional updates since not all stint messages are identical
             if "Compound" in latest_stint_data:
-                try:
-                    compound = str(latest_stint_data.get("Compound"))
-                except:
-                    continue
+                compound = str(latest_stint_data.get("Compound"))
 
                 self._update_driver_stint(
                     driver_number=driver_number,
@@ -297,15 +298,12 @@ class EventsCollection(Collection):
                 )
 
             if "TotalLaps" in latest_stint_data:
-                try:
-                    total_laps = int(latest_stint_data.get("TotalLaps"))
-                except:
-                    continue
+                tyre_age_at_start = int(latest_stint_data.get("TotalLaps"))
 
                 self._update_driver_stint(
                     driver_number=driver_number,
                     key="tyre_age_at_start",
-                    value=total_laps
+                    value=tyre_age_at_start
                 )
         
 
@@ -380,7 +378,7 @@ class EventsCollection(Collection):
                 position = None
 
             try:
-                lap_time = to_timedelta(data.get("BestLapTime", {}).get("Value")).total_seconds()
+                lap_time = to_timedelta(str(data.get("BestLapTime", {}).get("Value"))).total_seconds()
             except:
                 lap_time = None
 
@@ -423,36 +421,25 @@ class EventsCollection(Collection):
         incident_pattern = (
             r"^"
             r"(?:FIA\s+STEWARDS:\s+)?"
-            r"(?:(?P<marker>[A-Z0-9/\s]+?)\s+)?"                                                      # Captures marker if it exists
+            r"(?:(?P<marker>[A-Z0-9/\s]+?)\s+)?"                                                        # Captures marker if it exists
             r"(?:LAP\s+(?P<lap_number>\d+)\s+)?"                                                        # Captures lap number if it exists
             r"INCIDENT"
             r"(?:\s+INVOLVING\s+CARS?\s+(?P<driver_numbers>(?:\d+\s+\(\w+\)(?:\s*,\s*|\s+AND\s+)?)+))?" # Captures driver numbers if they exist
             r"\s+"
             r"NOTED"
-            r"(?:\s+-\s+(?P<incident_reason>.+))?"                                                      # Captures incident reason if it exists
+            r"(?:\s+-\s+(?P<reason>.+))?"                                                               # Captures incident reason if it exists
             r"$"
         )
         match = re.search(pattern=incident_pattern, string=race_control_message)
 
-        try:
-            incident_marker = str(match.group("marker"))
-        except:
-            incident_marker = None
-        
-        try:
-            incident_lap_number = int(match.group("lap_number"))
-        except:
-            incident_lap_number = None
+        incident_marker = str(match.group("marker")) if match.group("marker") is not None else None
+        incident_reason = str(match.group("reason")) if match.group("reason") is not None else None
+        incident_lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
 
         try:
             incident_driver_numbers = [int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))]
         except:
             incident_driver_numbers = []
-
-        try:
-            incident_reason = str(match.group("incident_reason"))
-        except:
-            incident_reason = None
         
         # Assume incidents between drivers specify a location and incidents between two or more drivers have driver at fault listed first,
         # since penalties can only be given if one driver is wholly or predominantly at fault?
@@ -532,9 +519,9 @@ class EventsCollection(Collection):
             # Track limit violation time is local, need to convert to UTC
             date = datetime.combine(
                 date=self.session_start.date(),
-                time=datetime.strptime(off_track_time, "%H:%M:%S").time(),
-                tzinfo=self.session_start.tzinfo
+                time=datetime.strptime(off_track_time, "%H:%M:%S").time()
             )
+            date = add_timezone_info(dt=date, gmt_offset=self.session_offset)
         except:
             date = None
 
@@ -542,7 +529,7 @@ class EventsCollection(Collection):
             "lap_number": off_track_lap_number if off_track_lap_number is None else lap_number, # Lap number for qualifying incidents is individual to driver
             "marker": off_track_marker,
             "message": race_control_message,
-            "driver_roles": {f"{off_track_driver_number}": "initiator"}
+            "driver_roles": {f"{off_track_driver_number}": "initiator"} if off_track_driver_number is not None else None
         }
 
         yield Event(
@@ -596,7 +583,6 @@ class EventsCollection(Collection):
                 next(
                     (driver_number for driver_number, data in message.content.items()
                         if all([
-                            isinstance(driver_number, int),
                             isinstance(data, dict),
                             data.get("OvertakeState") == 2
                         ])
@@ -610,7 +596,6 @@ class EventsCollection(Collection):
         try:
             overtaken_driver_numbers = [int(driver_number) for driver_number, data in message.content.items()
                 if all([
-                    isinstance(driver_number, int),
                     isinstance(data, dict),
                     data.get("OvertakeState") != 2
                 ])
@@ -622,9 +607,8 @@ class EventsCollection(Collection):
         try:
             overtake_position = int(
                 next(
-                    (data.get("Position") for driver_number, data in message.content.items()
+                    (data.get("Position") for data in message.content.values()
                         if all([
-                            isinstance(driver_number, int),
                             isinstance(data, dict),
                             data.get("OvertakeState") == 2,
                             data.get("Position") is not None
@@ -694,7 +678,7 @@ class EventsCollection(Collection):
             if not isinstance(latest_stint_data, dict):
                 continue
         
-            if not "Compound" in latest_stint_data or not "TotalLaps" in latest_stint_data:
+            if not "Compound" in latest_stint_data or latest_stint_data.get("TyresNotChanged") != "0":
                 continue
 
             details: EventDetails = {
@@ -754,30 +738,15 @@ class EventsCollection(Collection):
         match = re.search(pattern=incident_verdict_pattern, string=race_control_message)
 
         if match is not None:
-            try:
-                incident_verdict_marker = str(match.group("marker"))
-            except:
-                incident_verdict_marker = None
-
-            try:
-                incident_verdict_lap_number = int(match.group("lap_number"))
-            except:
-                incident_verdict_lap_number = None
+            incident_verdict_marker = str(match.group("marker")) if match.group("marker") is not None else None
+            incident_verdict = str(match.group("verdict")) if match.group("verdict") is not None else None
+            incident_verdict_reason = str(match.group("reason")) if match.group("reason") is not None else None
+            incident_verdict_lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
             
             try:
                 incident_verdict_driver_numbers = [int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))]
             except:
                 incident_verdict_driver_numbers = []
-
-            try:
-                incident_verdict = str(match.group("verdict"))
-            except:
-                incident_verdict = None
-
-            try:
-                incident_verdict_reason = str(match.group("reason"))
-            except:
-                incident_verdict_reason = None
             
             if len(incident_verdict_driver_numbers) == 0:
                 # Incident does not specify drivers
@@ -815,26 +784,15 @@ class EventsCollection(Collection):
         else:
             match = re.search(pattern=penalty_verdict_pattern, string=race_control_message)
 
-            try:
-                incident_verdict = str(match.group("verdict"))
-            except:
-                incident_verdict = None
-            
-            try:
-                incident_verdict_driver_number = int(match.group("driver_number"))
-            except:
-                incident_verdict_driver_number = None
-
-            try:
-                incident_verdict_reason = str(match.group("reason"))
-            except:
-                incident_verdict_reason = None
+            incident_verdict = str(match.group("verdict")) if match.group("verdict") is not None else None
+            incident_verdict_reason = str(match.group("reason")) if match.group("reason") is not None else None
+            incident_verdict_driver_number = int(match.group("driver_number")) if match.group("driver_number") is not None else None
             
             details: EventDetails = {
                 "verdict": incident_verdict,
                 "reason": incident_verdict_reason,
                 "message": race_control_message,
-                "driver_roles": {f"{incident_verdict_driver_number}": "initiator"}
+                "driver_roles": {f"{incident_verdict_driver_number}": "initiator"} if incident_verdict_driver_number is not None else None
             }
 
             yield Event(
@@ -873,11 +831,7 @@ class EventsCollection(Collection):
         if driver_number is None and race_control_message is not None:
             driver_flag_pattern = r"CAR (?P<driver_number>\d+)"
             match = re.search(pattern=driver_flag_pattern, string=race_control_message)
-
-            try:
-                driver_number = int(match.group("driver_number"))
-            except:
-                driver_number = None
+            driver_number = int(match.group("driver_number")) if match.group("driver_number") is not None else None
 
         details: EventDetails = {
             "lap_number": lap_number,
@@ -916,11 +870,7 @@ class EventsCollection(Collection):
 
         sector_pattern = r"(?P<marker>SECTOR\s+\d+)"
         match = re.search(pattern=sector_pattern, string=race_control_message)
-
-        try:
-            sector_marker = str(match.group("marker"))
-        except:
-            sector_marker = None
+        sector_marker = str(match.group("marker")) if match.group("marker") is not None else None
         
         details: EventDetails = {
             "lap_number": lap_number,
@@ -987,7 +937,7 @@ class EventsCollection(Collection):
         return {
             EventCause.HOTLAP: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData",
-                lambda: self.session_type == ("Practice" or "Qualifying"),
+                lambda: self.session_type in ["Practice", "Qualifying"],
                 lambda: deep_get(obj=message.content, key="Position") is not None,
                 lambda: deep_get(obj=message.content, key="BestLapTime") is not None
             ]),
@@ -1017,7 +967,8 @@ class EventsCollection(Collection):
                 lambda: message.topic == "TimingAppData",
                 lambda: self.session_type == "Race",
                 lambda: deep_get(obj=message.content, key="Compound") is not None,
-                lambda: deep_get(obj=message.content, key="TotalLaps") is not None
+                lambda: deep_get(obj=message.content, key="Compound") != "UNKNOWN",
+                lambda: deep_get(obj=message.content, key="TyresNotChanged") == "0" # TyresNotChanged being 0 indicates that pit stop is complete and tyre compound is known
             ]),
 
             EventCause.BLACK_FLAG: lambda message: all(cond() for cond in [
