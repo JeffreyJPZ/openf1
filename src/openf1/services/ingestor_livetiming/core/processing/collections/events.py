@@ -935,15 +935,16 @@ class EventsCollection(Collection):
     # message should be of type Message
     def _get_event_condition_map(self) -> dict[EventCause, Callable[..., bool]]:
         return {
+            # TODO: why is this condition not working
             EventCause.HOTLAP: lambda message: all(cond() for cond in [
-                lambda: message.topic == "TimingData",
+                lambda: message.topic == "TimingData", 
                 lambda: self.session_type in ["Practice", "Qualifying"],
                 lambda: deep_get(obj=message.content, key="Position") is not None,
                 lambda: deep_get(obj=message.content, key="BestLapTime") is not None
             ]),
             EventCause.INCIDENT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
-                lambda: deep_get(obj=message.content, key="Message"),
+                lambda: deep_get(obj=message.content, key="Message") is not None,
                 lambda: "INCIDENT" in deep_get(obj=message.content, key="Message"),
                 lambda: "NOTED" in deep_get(obj=message.content, key="Message")
             ]),
