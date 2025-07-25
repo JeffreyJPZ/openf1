@@ -75,7 +75,7 @@ def deep_get(obj: Any, key: Any) -> Any:
         elif isinstance(v, (dict, list)):
             return deep_get(v, key)
         
-    return False
+    return None
 
 
 def to_datetime(x: str | datetime | None) -> datetime | None:
