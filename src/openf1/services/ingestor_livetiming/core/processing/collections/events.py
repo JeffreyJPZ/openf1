@@ -1,7 +1,7 @@
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 from typing import Callable, Iterator, Literal, TypedDict
 
@@ -359,6 +359,8 @@ class EventsCollection(Collection):
         if not isinstance(timing_data, dict):
             return
         
+        print("Process potential hotlap")
+        
         for driver_number, data in timing_data.items():
             try:
                 driver_number = int(driver_number)
@@ -371,6 +373,8 @@ class EventsCollection(Collection):
             # Check if "Position" and "BestLapTime" fields exist - this indicates a personal best hotlap
             if not "Position" in data or not "BestLapTime" in data:
                 continue
+
+            print(f"Personal best hotlap: {data}")
 
             try:
                 position = int(data.get("Position"))
@@ -909,6 +913,27 @@ class EventsCollection(Collection):
     
 
     def _process_qualifying_part_start(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
+        data = message.content
+
+        qualifying_part_to_event_cause_map = {
+            1: EventCause.Q1_START,
+            2: EventCause.Q2_START,
+            3: EventCause.Q3_START
+        }
+
+        print("Process potential qualifying part start")
+
+        try:
+            qualifying_part = int(data.get("SessionPart"))
+            event_cause = qualifying_part_to_event_cause_map.get(qualifying_part)
+        except:
+            return
+        
+        if event_cause is None:
+            return
+        
+        print(f"Qualifying part start: {event_cause.value}")
+
         yield Event(
             meeting_key=self.meeting_key,
             session_key=self.session_key,
@@ -927,8 +952,8 @@ class EventsCollection(Collection):
             EventCause.HOTLAP: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData", 
                 lambda: self.session_type in ["Practice", "Qualifying"],
-                lambda: deep_get(obj=message.content, key="Position") is not None,
-                lambda: deep_get(obj=message.content, key="BestLapTime") is not None
+                # lambda: deep_get(obj=message.content, key="Position") is not None,
+                # lambda: deep_get(obj=message.content, key="BestLapTime") is not None
             ]),
             EventCause.INCIDENT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
@@ -1042,17 +1067,17 @@ class EventsCollection(Collection):
             EventCause.Q1_START: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData",
                 lambda: self.session_type == "Qualifying",
-                lambda: deep_get(obj=message.content, key="SessionPart") == 1
+                # lambda: deep_get(obj=message.content, key="SessionPart") == 1
             ]),
             EventCause.Q2_START: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData",
                 lambda: self.session_type == "Qualifying",
-                lambda: deep_get(obj=message.content, key="SessionPart") == 2
+                # lambda: deep_get(obj=message.content, key="SessionPart") == 2
             ]),
             EventCause.Q3_START: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData",
                 lambda: self.session_type == "Qualifying",
-                lambda: deep_get(obj=message.content, key="SessionPart") == 3
+                # lambda: deep_get(obj=message.content, key="SessionPart") == 3
             ])
         }
 
