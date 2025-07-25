@@ -576,65 +576,66 @@ class EventsCollection(Collection):
         
 
     def _process_overtake(self, message: Message) -> Iterator[Event]:
-        # Separate overtaking driver from overtaken drivers
-        # Overtake state 2 indicates that the driver is the one overtaking, all other drivers are being overtaken
+        # Overtaking driver has OvertakeState equal to 2, overtaken drivers may or may not have OvertakeState
         try:
             overtaking_driver_number = next(
-                (int(driver_number) for driver_number, data in message.content.items()
+                (
+                    int(driver_number)
+                    for driver_number, data in message.content.items()
                     if isinstance(data, dict) and data.get("OvertakeState") == 2
                 ),
-                None
+                None,
             )
         except:
             overtaking_driver_number = None
 
+        if overtaking_driver_number is None:
+            # Not an overtake message
+            return
+
         try:
-            overtaken_driver_numbers = [
-                int(driver_number) for driver_number, data in message.content.items()
-                    if isinstance(data, dict) and data.get("OvertakeState") != 2
+            overtaken_driver_data = [
+                (int(driver_number), int(data.get("Position")))
+                for driver_number, data in message.content.items()
+                if isinstance(data, dict)
+                and data.get("OvertakeState") != 2
+                and data.get("Position") is not None
             ]
         except:
-            overtaken_driver_numbers = []
+            overtaken_driver_data = []
 
-        # Get overtake position
-        try:
-            overtake_position = next(
-                (int(data.get("Position")) for data in message.content.values()
-                    if isinstance(data, dict) and data.get("OvertakeState") == 2 and data.get("Position") is not None
-                ),
-                None
-            )
-        except:
-            overtake_position = None
-
-        if overtaking_driver_number is None or len(overtaken_driver_numbers) == 0:
+        if len(overtaken_driver_data) == 0:
             # Need at least two drivers to have an overtake
             return
-        
-        driver_roles = {
-            **{f"{overtaking_driver_number}": "initiator"},
-            **{f"{driver_number}": "participant" for driver_number in overtaken_driver_numbers}
-        }
-        
-        details: EventDetails = {
-            "lap_number": self.lap_number,
-            "marker": {
-                "x": self.driver_positions.get(overtaking_driver_number, {}).get("x"),
-                "y": self.driver_positions.get(overtaking_driver_number, {}).get("y"),
-                "z": self.driver_positions.get(overtaking_driver_number, {}).get("z")
-            },
-            "position": overtake_position,
-            "driver_roles": driver_roles
-        }
 
-        yield Event(
-            meeting_key=self.meeting_key,
-            session_key=self.session_key,
-            date=message.timepoint,
-            category=EventCategory.DRIVER_ACTION.value,
-            cause=EventCause.OVERTAKE.value,
-            details=details
-        )
+        for overtaken_driver_number, position in overtaken_driver_data:
+            # position is the overtaken driver's position after being overtaken, adjust position to account for this
+            overtake_position = position - 1
+        
+            driver_roles = {
+                **{f"{overtaking_driver_number}": "initiator"},
+                **{f"{overtaken_driver_number}": "participant"}
+            }
+            
+            details: EventDetails = {
+                "lap_number": self.lap_number,
+                "marker": {
+                    "x": self.driver_positions.get(overtaking_driver_number, {}).get("x"),
+                    "y": self.driver_positions.get(overtaking_driver_number, {}).get("y"),
+                    "z": self.driver_positions.get(overtaking_driver_number, {}).get("z")
+                },
+                "position": overtake_position,
+                "driver_roles": driver_roles
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                category=EventCategory.DRIVER_ACTION.value,
+                cause=EventCause.OVERTAKE.value,
+                details=details
+            )
     
 
     def _process_pit(self, message: Message) -> Iterator[Event]:
