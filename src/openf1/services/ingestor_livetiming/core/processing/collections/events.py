@@ -103,8 +103,11 @@ class EventDetails(TypedDict):
     tyre_age_at_start: int | None
         The number of laps for a tyre at the time of the event - used for hotlap and pit events.
 
-    pit_duration: float | None
+    pit_lane_duration: float | None
         The total time spent in the pit lane, in seconds, for a pit.
+
+    pit_stop_duration: float | None
+        The total time spent stationary in the pit box, in seconds, for a pit.
     
     """
     lap_number: int | None
@@ -144,6 +147,7 @@ class EventsCollection(Collection):
         "DriverRaceInfo",
         "LapCount",
         "PitLaneTimeCollection",
+        "PitStopSeries", # New topic from 2025 onwards with stationary time for pit stops
         "Position.z",
         "RaceControlMessages",
         "SessionInfo",
@@ -159,7 +163,7 @@ class EventsCollection(Collection):
     driver_positions: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(dict))
     # Combine latest stint data with latest pit data for pit event - stint number should be one more than pit number
     driver_stints: dict[int, dict[Literal["compound", "tyre_age_at_start"], int | str]] = field(default_factory=lambda: defaultdict(dict))
-    driver_pits: dict[int, dict[Literal["date", "pit_duration", "lap_number"], datetime | float | int]] = field(default_factory=lambda: defaultdict(dict))
+    driver_pits: dict[int, dict[Literal["date", "pit_lane_duration", "pit_stop_duration", "lap_number"], datetime | float | int]] = field(default_factory=lambda: defaultdict(dict))
 
 
     def _update_lap_number(self, message: Message):
@@ -194,7 +198,11 @@ class EventsCollection(Collection):
         self.session_type = session_type
 
 
-    def _update_driver_position(self, driver_number: int, key: Literal["x", "y", "z"], value: int):
+    def _update_driver_position(
+            self, driver_number: int,
+            key: Literal["x", "y", "z"],
+            value: int
+        ):
         driver_position = self.driver_positions[driver_number] 
         old_value = driver_position.get(key)
         if value != old_value:
@@ -251,7 +259,12 @@ class EventsCollection(Collection):
             )
 
                 
-    def _update_driver_stint(self, driver_number: int, key: Literal["compound", "tyre_age_at_start"], value: bool | int | str):
+    def _update_driver_stint(
+            self,
+            driver_number: int,
+            key: Literal["compound", "tyre_age_at_start"],
+            value: bool | int | str
+        ):
         driver_stint = self.driver_stints[driver_number]
         old_value = driver_stint.get(key)
         if value != old_value:
@@ -305,7 +318,12 @@ class EventsCollection(Collection):
                 )
         
 
-    def _update_driver_pit(self, driver_number: int, key: Literal["date", "pit_duration", "lap_number"], value: datetime | float | int):
+    def _update_driver_pit(
+            self,
+            driver_number: int,
+            key: Literal["date", "pit_lane_duration", "pit_stop_duration", "lap_number"],
+            value: datetime | float | int
+        ):
         driver_pit = self.driver_pits[driver_number]
         old_value = driver_pit.get(key)
         if value != old_value:
@@ -325,12 +343,16 @@ class EventsCollection(Collection):
             except:
                 continue
             
-            if not isinstance(data, dict):
-                continue
+            pit_lane_duration = deep_get(obj=data, key="PitLaneTime") or deep_get(obj=data, key="Duration")
+            lap_number = deep_get(obj=data, key="Lap")
 
+            if pit_lane_duration is None or lap_number is None:
+                # Not a pit message
+                continue
+            
             try:
-                pit_duration = float(data.get("Duration"))
-                lap_number = int(data.get("Lap"))
+                pit_lane_duration = float(pit_lane_duration)
+                lap_number = int(lap_number)
             except:
                 continue
 
@@ -341,14 +363,29 @@ class EventsCollection(Collection):
             )
             self._update_driver_pit(
                 driver_number=driver_number,
-                key="pit_duration",
-                value=pit_duration
+                key="pit_lane_duration",
+                value=pit_lane_duration
             )
             self._update_driver_pit(
                 driver_number=driver_number,
                 key="lap_number",
                 value=lap_number
             )
+
+            # From 2025 onwards, get the stationary time if it exists
+            pit_stop_duration = deep_get(obj=data, key="PitStopTime")
+
+            if pit_stop_duration is not None:
+                try:
+                    pit_stop_duration = float(pit_stop_duration)
+                except:
+                    continue
+
+                self._update_driver_pit(
+                    driver_number=driver_number,
+                    key="pit_stop_duration",
+                    value=pit_stop_duration
+                )
 
 
     def _process_hotlap(self, message: Message) -> Iterator[Event]:
@@ -687,7 +724,8 @@ class EventsCollection(Collection):
                 "driver_roles": {f"{driver_number}": "initiator"},
                 "compound": self.driver_stints.get(driver_number, {}).get("compound"),
                 "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
-                "pit_duration": self.driver_pits.get(driver_number, {}).get("pit_duration")
+                "pit_lane_duration": self.driver_pits.get(driver_number, {}).get("pit_lane_duration"),
+                "pit_stop_duration": self.driver_pits.get(driver_number, {}).get("pit_stop_duration")
             }
 
             yield Event(
@@ -739,6 +777,7 @@ class EventsCollection(Collection):
         match = re.search(pattern=incident_verdict_pattern, string=race_control_message)
 
         if match is not None:
+            # Standard incident verdict message
             incident_verdict_marker = str(match.group("marker")) if match.group("marker") is not None else None
             incident_verdict = str(match.group("verdict")) if match.group("verdict") is not None else None
             incident_verdict_reason = str(match.group("reason")) if match.group("reason") is not None else None
@@ -785,6 +824,7 @@ class EventsCollection(Collection):
                 details=details
             )
         else:
+            # Penalty verdict message
             match = re.search(pattern=penalty_verdict_pattern, string=race_control_message)
 
             incident_verdict = str(match.group("verdict")) if match.group("verdict") is not None else None
@@ -1077,11 +1117,18 @@ class EventsCollection(Collection):
 
 
     def process_message(self, message: Message) -> Iterator[Event]:
+
         match (message.topic):
             case "LapCount":
                 self._update_lap_number(message)
             case "PitLaneTimeCollection":
-                self._update_driver_pits(message)
+                # Use "PitLaneTimeCollection" topic for seasons before 2025
+                if self.session_start is not None and self.session_start.year < 2025:
+                    self._update_driver_pits(message)
+            case "PitStopSeries":
+                # Use "PitStopSeries" topic from 2025 onwards
+                if self.session_start is not None and self.session_start.year >= 2025:
+                    self._update_driver_pits(message)
             case "Position.z":
                 self._update_driver_positions(message)
             case "SessionInfo":
