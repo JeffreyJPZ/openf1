@@ -25,7 +25,7 @@ class EventCategory(str, Enum):
 
 class EventCause(str, Enum):
     # Driver actions
-    HOTLAP = "hotlap" # Used in qualifying/practice sessions - personal best laps resulting in position changes
+    HOTLAP = "hotlap" # Used in qualifying/practice sessions - personal best laps
     INCIDENT = "incident" # Collisions, unsafe rejoin, safety car/start infringements, etc.
     OFF_TRACK = "off-track" # Track limits violations
     OUT = "out"
@@ -381,13 +381,10 @@ class EventsCollection(Collection):
             except:
                 last_lap_time = None
 
-            if all([
-                position is not None,
-                best_lap_time is not None,
-                last_lap_time is not None,
-                math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3)
-            ]):
-                # If "Position" field exists and "BestLapTime" and "LastLapTime" values are equal, then driver has set a personal best lap resulting in a position change
+            # Check for and compare lap times (up to thousandths precision)
+            if position is not None and best_lap_time is not None and last_lap_time is not None and math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
+                # If "Position" field exists and "BestLapTime" and "LastLapTime" values are equal,
+                # then driver has set a personal best lap resulting in a position change
                 details: EventDetails = {
                     "driver_role": {f"{driver_number}": "initiator"},
                     "position": position,
@@ -404,12 +401,9 @@ class EventsCollection(Collection):
                     cause=EventCause.HOTLAP.value,
                     details=details
                 )
-            elif all([
-                best_lap_time is not None,
-                last_lap_time is not None,
-                math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3)
-            ]):
-                # If only "BestLapTime" and "LastLapTime" values are equal, then driver has set a personal best lap, but no change in position
+            elif best_lap_time is not None and last_lap_time is not None and math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
+                # If only "BestLapTime" and "LastLapTime" values are equal, then driver has set a personal best lap,
+                # but no change in position
                 details: EventDetails = {
                     "driver_role": {f"{driver_number}": "initiator"},
                     "position": None,
@@ -465,7 +459,9 @@ class EventsCollection(Collection):
         incident_lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
 
         try:
-            incident_driver_numbers = [int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))]
+            incident_driver_numbers = [
+                int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))
+            ]
         except:
             incident_driver_numbers = []
         
@@ -749,7 +745,9 @@ class EventsCollection(Collection):
             incident_verdict_lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
             
             try:
-                incident_verdict_driver_numbers = [int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))]
+                incident_verdict_driver_numbers = [
+                    int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))
+                ]
             except:
                 incident_verdict_driver_numbers = []
             
