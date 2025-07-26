@@ -1,4 +1,5 @@
 import re
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -364,39 +365,60 @@ class EventsCollection(Collection):
 
             if not isinstance(data, dict):
                 continue
-
-            # Check if "Position" and "BestLapTime" fields exist - this indicates a personal best hotlap
-            if not "Position" in data or not "BestLapTime" in data:
-                continue
-
+            
             try:
                 position = int(data.get("Position"))
             except:
                 position = None
 
             try:
-                lap_time = to_timedelta(str(data.get("BestLapTime", {}).get("Value"))).total_seconds()
+                best_lap_time = to_timedelta(str(data.get("BestLapTime", {}).get("Value"))).total_seconds()
             except:
-                lap_time = None
+                best_lap_time = None
 
-            details: EventDetails = {
-                "driver_role": {f"{driver_number}": "initiator"},
-                "position": position,
-                "compound": self.driver_stints.get(driver_number, {}).get("compound"),
-                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
-                "lap_duration": lap_time
-            }
+            try:
+                last_lap_time = to_timedelta(str(data.get("LastLapTime", {}).get("Value"))).total_seconds()
+            except:
+                last_lap_time = None
 
-            yield Event(
-                meeting_key=self.meeting_key,
-                session_key=self.session_key,
-                date=message.timepoint,
-                category=EventCategory.DRIVER_ACTION.value,
-                cause=EventCause.HOTLAP.value,
-                details=details
-            )
+            if position is not None and best_lap_time is not None:
+                # If "Position" field exists and "BestLapTime" has a value, then driver has set a personal best lap resulting in a position change
+                details: EventDetails = {
+                    "driver_role": {f"{driver_number}": "initiator"},
+                    "position": position,
+                    "compound": self.driver_stints.get(driver_number, {}).get("compound"),
+                    "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
+                    "lap_duration": best_lap_time
+                }
+
+                yield Event(
+                    meeting_key=self.meeting_key,
+                    session_key=self.session_key,
+                    date=message.timepoint,
+                    category=EventCategory.DRIVER_ACTION.value,
+                    cause=EventCause.HOTLAP.value,
+                    details=details
+                )
+            elif best_lap_time is not None and last_lap_time is not None and math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
+                # If "BestLapTime" and "LastLapTime" values are equal, then driver has set a personal best lap, but no change in position
+                details: EventDetails = {
+                    "driver_role": {f"{driver_number}": "initiator"},
+                    "position": None,
+                    "compound": self.driver_stints.get(driver_number, {}).get("compound"),
+                    "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
+                    "lap_duration": best_lap_time
+                }
+
+                yield Event(
+                    meeting_key=self.meeting_key,
+                    session_key=self.session_key,
+                    date=message.timepoint,
+                    category=EventCategory.DRIVER_ACTION.value,
+                    cause=EventCause.HOTLAP.value,
+                    details=details
+                )
+
     
-
     def _process_incident(self, message: Message) -> Iterator[Event]:
         race_control_message = deep_get(obj=message.content, key="Message")
 
@@ -562,7 +584,7 @@ class EventsCollection(Collection):
         
 
     def _process_overtake(self, message: Message) -> Iterator[Event]:
-        # Overtaking driver has OvertakeState equal to 2, overtaken drivers may or may not have OvertakeState
+        # Overtaking driver has "OvertakeState" equal to 2, overtaken drivers may or may not have "OvertakeState"
         try:
             overtaking_driver_number = next(
                 (
@@ -763,6 +785,8 @@ class EventsCollection(Collection):
             incident_verdict_driver_number = int(match.group("driver_number")) if match.group("driver_number") is not None else None
             
             details: EventDetails = {
+                "lap_number": None,
+                "marker": None,
                 "verdict": incident_verdict,
                 "reason": incident_verdict_reason,
                 "message": race_control_message,
