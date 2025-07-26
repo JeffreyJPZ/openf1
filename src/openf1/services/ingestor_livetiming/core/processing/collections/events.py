@@ -381,8 +381,13 @@ class EventsCollection(Collection):
             except:
                 last_lap_time = None
 
-            if position is not None and best_lap_time is not None:
-                # If "Position" field exists and "BestLapTime" has a value, then driver has set a personal best lap resulting in a position change
+            if all([
+                position is not None,
+                best_lap_time is not None,
+                last_lap_time is not None,
+                math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3)
+            ]):
+                # If "Position" field exists and "BestLapTime" and "LastLapTime" values are equal, then driver has set a personal best lap resulting in a position change
                 details: EventDetails = {
                     "driver_role": {f"{driver_number}": "initiator"},
                     "position": position,
@@ -399,8 +404,12 @@ class EventsCollection(Collection):
                     cause=EventCause.HOTLAP.value,
                     details=details
                 )
-            elif best_lap_time is not None and last_lap_time is not None and math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
-                # If "BestLapTime" and "LastLapTime" values are equal, then driver has set a personal best lap, but no change in position
+            elif all([
+                best_lap_time is not None,
+                last_lap_time is not None,
+                math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3)
+            ]):
+                # If only "BestLapTime" and "LastLapTime" values are equal, then driver has set a personal best lap, but no change in position
                 details: EventDetails = {
                     "driver_role": {f"{driver_number}": "initiator"},
                     "position": None,
