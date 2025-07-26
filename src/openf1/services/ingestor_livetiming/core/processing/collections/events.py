@@ -198,7 +198,11 @@ class EventsCollection(Collection):
         self.session_type = session_type
 
 
-    def _update_driver_position(self, driver_number: int, key: Literal["x", "y", "z"], value: int):
+    def _update_driver_position(
+            self, driver_number: int,
+            key: Literal["x", "y", "z"],
+            value: int
+        ):
         driver_position = self.driver_positions[driver_number] 
         old_value = driver_position.get(key)
         if value != old_value:
@@ -255,7 +259,12 @@ class EventsCollection(Collection):
             )
 
                 
-    def _update_driver_stint(self, driver_number: int, key: Literal["compound", "tyre_age_at_start"], value: bool | int | str):
+    def _update_driver_stint(
+            self,
+            driver_number: int,
+            key: Literal["compound", "tyre_age_at_start"],
+            value: bool | int | str
+        ):
         driver_stint = self.driver_stints[driver_number]
         old_value = driver_stint.get(key)
         if value != old_value:
@@ -309,7 +318,12 @@ class EventsCollection(Collection):
                 )
         
 
-    def _update_driver_pit(self, driver_number: int, key: Literal["date", "pit_lane_duration", "pit_stop_duration", "lap_number"], value: datetime | float | int):
+    def _update_driver_pit(
+            self,
+            driver_number: int,
+            key: Literal["date", "pit_lane_duration", "pit_stop_duration", "lap_number"],
+            value: datetime | float | int
+        ):
         driver_pit = self.driver_pits[driver_number]
         old_value = driver_pit.get(key)
         if value != old_value:
