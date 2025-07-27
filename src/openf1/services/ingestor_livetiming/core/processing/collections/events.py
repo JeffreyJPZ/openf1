@@ -629,7 +629,7 @@ class EventsCollection(Collection):
         )
     
 
-    def _process_out(self, message: Message) -> Iterator[Event]:
+    def _process_outs(self, message: Message) -> Iterator[Event]:
         for driver_number, data in message.content.items():
             try:
                 driver_number = int(driver_number)
@@ -662,7 +662,7 @@ class EventsCollection(Collection):
             )
         
 
-    def _process_overtake(self, message: Message) -> Iterator[Event]:
+    def _process_overtakes(self, message: Message) -> Iterator[Event]:
         # Overtaking driver has "OvertakeState" equal to 2, overtaken drivers may or may not have "OvertakeState"
         try:
             overtaking_driver_number = next(
@@ -725,7 +725,7 @@ class EventsCollection(Collection):
             )
 
     
-    def _process_personal_best_lap(self, message: Message) -> Iterator[Event]:
+    def _process_personal_best_laps(self, message: Message) -> Iterator[Event]:
         timing_data = deep_get(obj=message.content, key="Lines")
 
         if not isinstance(timing_data, dict):
@@ -796,7 +796,7 @@ class EventsCollection(Collection):
                 )
     
 
-    def _process_pit(self, message: Message) -> Iterator[Event]:
+    def _process_pits(self, message: Message) -> Iterator[Event]:
         # Use stint information to determine if a pit has occurred since pit information arrives before corresponding stint information
         # driver_pits should already be updated at this point
         stints = deep_get(obj=message.content, key="Lines")
@@ -846,7 +846,7 @@ class EventsCollection(Collection):
             )
 
     
-    def _process_elimination(self, message: Message) -> Iterator[Event]:
+    def _process_eliminations(self, message: Message) -> Iterator[Event]:
         try:
             current_qualifying_stage_number = int(deep_get(obj=message.content, key="SessionPart"))
         except:
@@ -1347,16 +1347,16 @@ class EventsCollection(Collection):
         return {
             EventCause.INCIDENT: lambda message: self._process_incident(message),
             EventCause.OFF_TRACK: lambda message: self._process_off_track(message),
-            EventCause.OUT: lambda message: self._process_out(message),
-            EventCause.OVERTAKE: lambda message: self._process_overtake(message),
-            EventCause.PERSONAL_BEST_LAP: lambda message: self._process_personal_best_lap(message),
-            EventCause.PIT: lambda message: self._process_pit(message),
+            EventCause.OUT: lambda message: self._process_outs(message),
+            EventCause.OVERTAKE: lambda message: self._process_overtakes(message),
+            EventCause.PERSONAL_BEST_LAP: lambda message: self._process_personal_best_laps(message),
+            EventCause.PIT: lambda message: self._process_pits(message),
             
             EventCause.BLACK_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_FLAG),
             EventCause.BLACK_AND_ORANGE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_AND_ORANGE_FLAG),
             EventCause.BLACK_AND_WHITE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_AND_WHITE_FLAG),
             EventCause.BLUE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLUE_FLAG),
-            EventCause.ELIMINATION: lambda message: self._process_elimination(message),
+            EventCause.ELIMINATION: lambda message: self._process_eliminations(message),
             EventCause.INCIDENT_VERDICT: lambda message: self._process_incident_verdict(message),
 
             EventCause.GREEN_FLAG: (
