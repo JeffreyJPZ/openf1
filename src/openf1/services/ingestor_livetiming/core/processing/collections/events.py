@@ -1,5 +1,7 @@
-import re
+import hashlib
+import json
 import math
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -14,19 +16,25 @@ from openf1.services.ingestor_livetiming.core.objects import (
     Message,
 )
 from openf1.util.misc import deep_get, to_datetime, to_timedelta, add_timezone_info
-    
+
+
+def _hash_obj(obj: dict) -> str:
+    """
+    Returns a SHA3-512 hashed value representing a dictionary.
+    """
+    return hashlib.sha3_512(json.dumps(obj=obj, sort_keys=True).encode("utf-8")).hexdigest()
+
 
 class EventCategory(str, Enum):
     DRIVER_ACTION = "driver-action" # Actions by drivers - pit, out, overtakes, personal best laps, off-track (track limits violations), incidents
     DRIVER_NOTIFICATION = "driver-notification" # Race control messsages to drivers - blue flags, black flags, black and white flags, black and orange flags, incident verdicts
     SECTOR_NOTIFICATION = "sector-notification" # Green (sector clear), yellow, double-yellow flags
     TRACK_NOTIFICATION = "track-notification" # Green (track clear) flags, red flags, chequered flags, safety cars
-    SESSION_NOTIFICATION = "session-notification" # Session start/end, qualifying stage start/end
+    SESSION_NOTIFICATION = "session-notification" # Session start/end/pause/resume, practice start/end, qualifying stage start/end, race start/end
 
 
 class EventCause(str, Enum):
     # Driver actions
-    ELIMINATION = "elimination" # Used in qualifying sessions if a driver was eliminated in a qualifying stage (Q1, Q2, SQ1, SQ2)
     PERSONAL_BEST_LAP = "personal-best-lap" # Used in qualifying/practice sessions - personal best laps
     INCIDENT = "incident" # Collisions, unsafe rejoin, safety car/start infringements, etc.
     OFF_TRACK = "off-track" # Track limits violations
@@ -39,6 +47,7 @@ class EventCause(str, Enum):
     BLACK_AND_ORANGE_FLAG = "black-and-orange-flag"
     BLACK_AND_WHITE_FLAG = "black-and-white-flag"
     BLUE_FLAG = "blue-flag"
+    ELIMINATION = "elimination" # Used in qualifying sessions if a driver was eliminated in a qualifying stage (Q1, Q2, SQ1, SQ2)
     INCIDENT_VERDICT = "incident-verdict" # Penalties, reprimands, no further investigations, etc.
 
     # Sector notifications
@@ -88,7 +97,7 @@ class EventDetails(TypedDict):
 
     driver_roles: dict[str, Literal['initiator', 'participant']] | None
         Maps driver numbers to a role describing their involvement in the event:
-            - 'initiator' if the driver was the main reason for the event (e.g. causing an incident)
+            - 'initiator' if the driver is the main reason/is directly responsible for the event (e.g. causing an incident)
             - 'participant' if the driver is merely involved in the event (e.g. being overtaken, being the victim of an incident).
         Events that only involve one driver (e.g. pit, out) will list the driver as the initiator
 
@@ -144,7 +153,6 @@ class EventDetails(TypedDict):
     pit_lane_duration: float | None
     pit_stop_duration: float | None
     qualifying_stage_number: Literal[1, 2] | None
-    eliminated: bool | None
 
 
 @dataclass(eq=False)
@@ -160,7 +168,8 @@ class Event(Document):
     def unique_key(self) -> tuple:
         return (
             self.date,
-            self.cause
+            self.cause,
+            _hash_obj(self.details)
         )
 
 
@@ -481,49 +490,6 @@ class EventsCollection(Collection):
             self._update_driver_position(driver_number=driver_number, value=position)
 
     
-    def _process_elimination(self, message: Message) -> Iterator[Event]:
-        try:
-            current_qualifying_stage_number = int(deep_get(obj=message.content, key="SessionPart"))
-        except:
-            return
-        
-        if current_qualifying_stage_number not in [2, 3]:
-            return
-        
-        driver_status_data = deep_get(obj=message.content, key="Lines")
-
-        if not isinstance(driver_status_data, dict):
-            return
-        
-        for driver_number, data in driver_status_data.items():
-            try:
-                driver_number = int(driver_number)
-            except:
-                continue
-            
-            if not isinstance(data, dict):
-                continue
-
-            eliminated = bool(data.get("KnockedOut")) or False
-
-            if not eliminated:
-                return
-            
-            details: EventDetails = {
-                "position": self.driver_positions.get(driver_number),
-                "qualifying_stage_number": current_qualifying_stage_number - 1 # Driver was eliminated in the previous qualifying stage 
-            }
-
-            yield Event(
-                meeting_key=self.meeting_key,
-                session_key=self.session_key,
-                date=message.timepoint,
-                category=EventCategory.DRIVER_ACTION.value,
-                cause=EventCause.ELIMINATION.value,
-                details=details
-            )
-
-    
     def _process_incident(self, message: Message) -> Iterator[Event]:
         race_control_message = deep_get(obj=message.content, key="Message")
 
@@ -663,7 +629,7 @@ class EventsCollection(Collection):
         )
     
 
-    def _process_out(self, message: Message) -> Iterator[Event]:
+    def _process_outs(self, message: Message) -> Iterator[Event]:
         for driver_number, data in message.content.items():
             try:
                 driver_number = int(driver_number)
@@ -696,7 +662,7 @@ class EventsCollection(Collection):
             )
         
 
-    def _process_overtake(self, message: Message) -> Iterator[Event]:
+    def _process_overtakes(self, message: Message) -> Iterator[Event]:
         # Overtaking driver has "OvertakeState" equal to 2, overtaken drivers may or may not have "OvertakeState"
         try:
             overtaking_driver_number = next(
@@ -759,7 +725,7 @@ class EventsCollection(Collection):
             )
 
     
-    def _process_personal_best_lap(self, message: Message) -> Iterator[Event]:
+    def _process_personal_best_laps(self, message: Message) -> Iterator[Event]:
         timing_data = deep_get(obj=message.content, key="Lines")
 
         if not isinstance(timing_data, dict):
@@ -830,7 +796,7 @@ class EventsCollection(Collection):
                 )
     
 
-    def _process_pit(self, message: Message) -> Iterator[Event]:
+    def _process_pits(self, message: Message) -> Iterator[Event]:
         # Use stint information to determine if a pit has occurred since pit information arrives before corresponding stint information
         # driver_pits should already be updated at this point
         stints = deep_get(obj=message.content, key="Lines")
@@ -876,6 +842,50 @@ class EventsCollection(Collection):
                 date=self.driver_pits.get(driver_number, {}).get("date"),
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.PIT.value,
+                details=details
+            )
+
+    
+    def _process_eliminations(self, message: Message) -> Iterator[Event]:
+        try:
+            current_qualifying_stage_number = int(deep_get(obj=message.content, key="SessionPart"))
+        except:
+            return
+        
+        if current_qualifying_stage_number not in [2, 3]:
+            return
+        
+        driver_status_data = deep_get(obj=message.content, key="Lines")
+
+        if not isinstance(driver_status_data, dict):
+            return
+        
+        for driver_number, data in driver_status_data.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+            
+            if not isinstance(data, dict):
+                continue
+
+            eliminated = bool(data.get("KnockedOut")) or False
+
+            if not eliminated:
+                continue
+            
+            details: EventDetails = {
+                "position": self.driver_positions.get(driver_number),
+                "qualifying_stage_number": current_qualifying_stage_number - 1, # Driver was eliminated in the previous qualifying stage
+                "driver_roles": {f"{driver_number}": "initiator"} 
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                category=EventCategory.DRIVER_NOTIFICATION.value,
+                cause=EventCause.ELIMINATION.value,
                 details=details
             )
 
@@ -1125,11 +1135,6 @@ class EventsCollection(Collection):
     # message should be of type Message
     def _get_event_condition_map(self) -> dict[EventCause, Callable[..., bool]]:
         return {
-            EventCause.ELIMINATION: lambda message: all(cond() for cond in [
-                lambda: message.topic == "TimingData", 
-                lambda: self.session_type == "Qualifying",
-                lambda: deep_get(obj=message.content, key="SessionPart") in [2, 3] # We only know the results of the previous stage after the next stage begins
-            ]),
             EventCause.INCIDENT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
                 lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
@@ -1181,6 +1186,11 @@ class EventsCollection(Collection):
             EventCause.BLUE_FLAG: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
                 lambda: deep_get(obj=message.content, key="Flag") == "BLUE"
+            ]),
+            EventCause.ELIMINATION: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingData", 
+                lambda: self.session_type == "Qualifying",
+                lambda: deep_get(obj=message.content, key="SessionPart") in [2, 3] # We only know the results of the previous stage after the next stage begins
             ]),
             EventCause.INCIDENT_VERDICT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
@@ -1335,18 +1345,18 @@ class EventsCollection(Collection):
     # message should be of type Message
     def _get_event_processing_map(self) -> dict[EventCause, Callable[..., Iterator[Event]]]:
         return {
-            EventCause.ELIMINATION: lambda message: self._process_elimination(message),
             EventCause.INCIDENT: lambda message: self._process_incident(message),
             EventCause.OFF_TRACK: lambda message: self._process_off_track(message),
-            EventCause.OUT: lambda message: self._process_out(message),
-            EventCause.OVERTAKE: lambda message: self._process_overtake(message),
-            EventCause.PERSONAL_BEST_LAP: lambda message: self._process_personal_best_lap(message),
-            EventCause.PIT: lambda message: self._process_pit(message),
+            EventCause.OUT: lambda message: self._process_outs(message),
+            EventCause.OVERTAKE: lambda message: self._process_overtakes(message),
+            EventCause.PERSONAL_BEST_LAP: lambda message: self._process_personal_best_laps(message),
+            EventCause.PIT: lambda message: self._process_pits(message),
             
             EventCause.BLACK_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_FLAG),
             EventCause.BLACK_AND_ORANGE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_AND_ORANGE_FLAG),
             EventCause.BLACK_AND_WHITE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_AND_WHITE_FLAG),
             EventCause.BLUE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLUE_FLAG),
+            EventCause.ELIMINATION: lambda message: self._process_eliminations(message),
             EventCause.INCIDENT_VERDICT: lambda message: self._process_incident_verdict(message),
 
             EventCause.GREEN_FLAG: (
