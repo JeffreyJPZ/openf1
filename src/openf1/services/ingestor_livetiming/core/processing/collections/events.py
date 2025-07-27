@@ -35,7 +35,6 @@ class EventCategory(str, Enum):
 
 class EventCause(str, Enum):
     # Driver actions
-    ELIMINATION = "elimination" # Used in qualifying sessions if a driver was eliminated in a qualifying stage (Q1, Q2, SQ1, SQ2)
     PERSONAL_BEST_LAP = "personal-best-lap" # Used in qualifying/practice sessions - personal best laps
     INCIDENT = "incident" # Collisions, unsafe rejoin, safety car/start infringements, etc.
     OFF_TRACK = "off-track" # Track limits violations
@@ -48,6 +47,7 @@ class EventCause(str, Enum):
     BLACK_AND_ORANGE_FLAG = "black-and-orange-flag"
     BLACK_AND_WHITE_FLAG = "black-and-white-flag"
     BLUE_FLAG = "blue-flag"
+    ELIMINATION = "elimination" # Used in qualifying sessions if a driver was eliminated in a qualifying stage (Q1, Q2, SQ1, SQ2)
     INCIDENT_VERDICT = "incident-verdict" # Penalties, reprimands, no further investigations, etc.
 
     # Sector notifications
@@ -490,50 +490,6 @@ class EventsCollection(Collection):
             self._update_driver_position(driver_number=driver_number, value=position)
 
     
-    def _process_elimination(self, message: Message) -> Iterator[Event]:
-        try:
-            current_qualifying_stage_number = int(deep_get(obj=message.content, key="SessionPart"))
-        except:
-            return
-        
-        if current_qualifying_stage_number not in [2, 3]:
-            return
-        
-        driver_status_data = deep_get(obj=message.content, key="Lines")
-
-        if not isinstance(driver_status_data, dict):
-            return
-        
-        for driver_number, data in driver_status_data.items():
-            try:
-                driver_number = int(driver_number)
-            except:
-                continue
-            
-            if not isinstance(data, dict):
-                continue
-
-            eliminated = bool(data.get("KnockedOut")) or False
-
-            if not eliminated:
-                continue
-            
-            details: EventDetails = {
-                "position": self.driver_positions.get(driver_number),
-                "qualifying_stage_number": current_qualifying_stage_number - 1, # Driver was eliminated in the previous qualifying stage
-                "driver_roles": {f"{driver_number}": "initiator"} 
-            }
-
-            yield Event(
-                meeting_key=self.meeting_key,
-                session_key=self.session_key,
-                date=message.timepoint,
-                category=EventCategory.DRIVER_ACTION.value,
-                cause=EventCause.ELIMINATION.value,
-                details=details
-            )
-
-    
     def _process_incident(self, message: Message) -> Iterator[Event]:
         race_control_message = deep_get(obj=message.content, key="Message")
 
@@ -889,6 +845,50 @@ class EventsCollection(Collection):
                 details=details
             )
 
+    
+    def _process_elimination(self, message: Message) -> Iterator[Event]:
+        try:
+            current_qualifying_stage_number = int(deep_get(obj=message.content, key="SessionPart"))
+        except:
+            return
+        
+        if current_qualifying_stage_number not in [2, 3]:
+            return
+        
+        driver_status_data = deep_get(obj=message.content, key="Lines")
+
+        if not isinstance(driver_status_data, dict):
+            return
+        
+        for driver_number, data in driver_status_data.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+            
+            if not isinstance(data, dict):
+                continue
+
+            eliminated = bool(data.get("KnockedOut")) or False
+
+            if not eliminated:
+                continue
+            
+            details: EventDetails = {
+                "position": self.driver_positions.get(driver_number),
+                "qualifying_stage_number": current_qualifying_stage_number - 1, # Driver was eliminated in the previous qualifying stage
+                "driver_roles": {f"{driver_number}": "initiator"} 
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                category=EventCategory.DRIVER_NOTIFICATION.value,
+                cause=EventCause.ELIMINATION.value,
+                details=details
+            )
+
 
     def _process_incident_verdict(self, message: Message) -> Iterator[Event]:
         race_control_message = deep_get(obj=message.content, key="Message")
@@ -1135,11 +1135,6 @@ class EventsCollection(Collection):
     # message should be of type Message
     def _get_event_condition_map(self) -> dict[EventCause, Callable[..., bool]]:
         return {
-            EventCause.ELIMINATION: lambda message: all(cond() for cond in [
-                lambda: message.topic == "TimingData", 
-                lambda: self.session_type == "Qualifying",
-                lambda: deep_get(obj=message.content, key="SessionPart") in [2, 3] # We only know the results of the previous stage after the next stage begins
-            ]),
             EventCause.INCIDENT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
                 lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
@@ -1191,6 +1186,11 @@ class EventsCollection(Collection):
             EventCause.BLUE_FLAG: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
                 lambda: deep_get(obj=message.content, key="Flag") == "BLUE"
+            ]),
+            EventCause.ELIMINATION: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingData", 
+                lambda: self.session_type == "Qualifying",
+                lambda: deep_get(obj=message.content, key="SessionPart") in [2, 3] # We only know the results of the previous stage after the next stage begins
             ]),
             EventCause.INCIDENT_VERDICT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
@@ -1345,7 +1345,6 @@ class EventsCollection(Collection):
     # message should be of type Message
     def _get_event_processing_map(self) -> dict[EventCause, Callable[..., Iterator[Event]]]:
         return {
-            EventCause.ELIMINATION: lambda message: self._process_elimination(message),
             EventCause.INCIDENT: lambda message: self._process_incident(message),
             EventCause.OFF_TRACK: lambda message: self._process_off_track(message),
             EventCause.OUT: lambda message: self._process_out(message),
@@ -1357,6 +1356,7 @@ class EventsCollection(Collection):
             EventCause.BLACK_AND_ORANGE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_AND_ORANGE_FLAG),
             EventCause.BLACK_AND_WHITE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_AND_WHITE_FLAG),
             EventCause.BLUE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLUE_FLAG),
+            EventCause.ELIMINATION: lambda message: self._process_elimination(message),
             EventCause.INCIDENT_VERDICT: lambda message: self._process_incident_verdict(message),
 
             EventCause.GREEN_FLAG: (
