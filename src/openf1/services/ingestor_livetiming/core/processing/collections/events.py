@@ -27,11 +27,11 @@ def _hash_obj(obj: dict) -> str:
 
 class EventCategory(str, Enum):
     DRIVER_ACTION = "driver-action" # Actions by drivers - pit, out, overtakes, personal best laps, off-track (track limits violations), incidents
-    DRIVER_NOTIFICATION = "driver-notification" # Race control messsages to drivers - blue flags, black flags, black and white flags, black and orange flags, incident verdicts
+    DRIVER_NOTIFICATION = "driver-notification" # Other events involving drivers - blue flags, black flags, black and white flags, black and orange flags, incident verdicts, eliminations, provisional classifications
     SECTOR_NOTIFICATION = "sector-notification" # Green (sector clear), yellow, double-yellow flags
     TRACK_NOTIFICATION = "track-notification" # Green (track clear) flags, red flags, chequered flags, safety cars
     SESSION_NOTIFICATION = "session-notification" # Session start/end/pause/resume, practice start/end, qualifying stage start/end, race start/end
-
+    OTHER = "other" # Other types of events not covered by the other categories - race control messages
 
 class EventCause(str, Enum):
     # Driver actions
@@ -49,6 +49,7 @@ class EventCause(str, Enum):
     BLUE_FLAG = "blue-flag"
     ELIMINATION = "elimination" # Used in qualifying sessions if a driver was eliminated in a qualifying stage (Q1, Q2, SQ1, SQ2)
     INCIDENT_VERDICT = "incident-verdict" # Penalties, reprimands, no further investigations, etc.
+    PROVISIONAL_CLASSIFICATION = "provisional-classification" # Driver positions at the end of the session
 
     # Sector notifications
     GREEN_FLAG = "green-flag"
@@ -78,6 +79,9 @@ class EventCause(str, Enum):
     Q3_END = "q3-end"
     RACE_START = "race-start"
     RACE_END = "race-end"
+
+    # Other
+    RACE_CONTROL_MESSAGE = "race-control-message"
 
 
 class EventDetails(TypedDict):
@@ -183,7 +187,7 @@ class EventsCollection(Collection):
         "PitStopSeries", # New topic from 2025 onwards with stationary time for pit stops
         "Position.z",
         "RaceControlMessages",
-        "SessionData", # TODO: process
+        "SessionData",
         "SessionInfo",
         "TimingAppData",
         "TimingData"
@@ -193,7 +197,7 @@ class EventsCollection(Collection):
     session_start: datetime = field(default=None)
     session_offset: str = field(default=None) # GMT offset
     session_type: Literal["Practice", "Qualifying", "Race"] = field(default=None)
-    session_status: Literal["Started", "Aborted", "Finished", "Ends"] = field(default=None) # Track session state to help create session notifications
+    session_status: Literal["Aborted", "Ends", "Finalised", "Finished", "Started"] = field(default=None) # Track session state to help create session notifications
 
     lap_number: int = field(default=None)
     qualifying_stage_number: Literal[1, 2, 3] = field(default=None) # Track qualifying stage number to help create session notifications
@@ -247,8 +251,8 @@ class EventsCollection(Collection):
         except:
             return
         
-        if session_status not in ["Started", "Aborted", "Finished", "Ends"]:
-            # Ignore "Inactive" status since it conflicts with event condition logic and "Finalised" status due to redundancy
+        if session_status not in ["Aborted", "Ends", "Finalised", "Finished", "Started"]:
+            # Ignore "Inactive" status since it conflicts with event condition logic
             return
         
         self.session_status = session_status
@@ -1000,7 +1004,28 @@ class EventsCollection(Collection):
                 cause=EventCause.INCIDENT_VERDICT.value,
                 details=details
             )
+
     
+    def _process_provisional_classification(self, message: Message) -> Iterator[Event]:
+        # Create provisional classification events for all drivers just before session end
+        for driver_number, position in self.driver_positions.items():
+            details: EventDetails = {
+                "position": position,
+                "driver_roles": {f"{driver_number}": "initiator"}
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                category=EventCategory.DRIVER_NOTIFICATION.value,
+                cause=EventCause.PROVISIONAL_CLASSIFICATION.value,
+                details=details
+            )
+
+        # Update session status with new session status
+        self._update_session_status(message)
+
 
     def _process_driver_flag(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
         race_control_message = deep_get(obj=message.content, key="Message")
@@ -1064,7 +1089,6 @@ class EventsCollection(Collection):
             lap_number = None
         
         # Extract sector from race control message
-
         sector_pattern = r"(?P<marker>SECTOR\s+\d+)"
         match = re.search(pattern=sector_pattern, string=race_control_message)
         sector_marker = str(match.group("marker")) if match.group("marker") is not None else None
@@ -1129,6 +1153,38 @@ class EventsCollection(Collection):
 
         # Update session status with new session status
         self._update_session_status(message)
+
+
+    def _process_race_control_message(self, message: Message) -> Iterator[Event]:
+        race_control_message = deep_get(obj=message.content, key="Message")
+
+        if not isinstance(race_control_message, str):
+            return
+        
+        try:
+            date = to_datetime(deep_get(obj=message.content, key="Utc"))
+            date = pytz.utc.localize(date)
+        except:
+            date = None
+
+        try:
+            lap_number = int(deep_get(obj=message.content, key="Lap"))
+        except:
+            lap_number = None
+
+        details: EventDetails = {
+            "lap_number": lap_number,
+            "message": race_control_message
+        }
+
+        yield Event(
+            meeting_key=self.meeting_key,
+            session_key=self.session_key,
+            date=date,
+            category=EventCategory.OTHER.value,
+            cause=EventCause.RACE_CONTROL_MESSAGE.value,
+            details=details
+        )
 
 
     # Maps event causes to unique conditions that determine if event messages belong to that cause
@@ -1197,6 +1253,11 @@ class EventsCollection(Collection):
                 lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "FIA STEWARDS" in deep_get(obj=message.content, key="Message"),
                 lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message") # "UNDER INVESTIGATION" is not a verdict
+            ]),
+            EventCause.PROVISIONAL_CLASSIFICATION: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_status is not None,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Finalised"
             ]),
 
             EventCause.GREEN_FLAG: lambda message: all(cond() for cond in [
@@ -1337,6 +1398,11 @@ class EventsCollection(Collection):
                 lambda: self.session_type == "Race",
                 lambda: self.session_status is not None,
                 lambda: deep_get(obj=message.content, key="SessionStatus") == "Finished"
+            ]),
+
+            EventCause.RACE_CONTROL_MESSAGE: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: isinstance(deep_get(obj=message.content, key="Message"), str)
             ])
         }
 
@@ -1358,6 +1424,7 @@ class EventsCollection(Collection):
             EventCause.BLUE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLUE_FLAG),
             EventCause.ELIMINATION: lambda message: self._process_eliminations(message),
             EventCause.INCIDENT_VERDICT: lambda message: self._process_incident_verdict(message),
+            EventCause.PROVISIONAL_CLASSIFICATION: lambda message: self._process_provisional_classification(message),
 
             EventCause.GREEN_FLAG: (
                 lambda message: self._process_sector_flag(message=message, event_cause=EventCause.GREEN_FLAG) 
@@ -1387,7 +1454,9 @@ class EventsCollection(Collection):
             EventCause.Q3_START: lambda message: self._process_session_notification(message=message, event_cause=EventCause.Q3_START),
             EventCause.Q3_END: lambda message: self._process_session_notification(message=message, event_cause=EventCause.Q3_END),
             EventCause.RACE_START: lambda message: self._process_session_notification(message=message, event_cause=EventCause.RACE_START),
-            EventCause.RACE_END: lambda message: self._process_session_notification(message=message, event_cause=EventCause.RACE_END)
+            EventCause.RACE_END: lambda message: self._process_session_notification(message=message, event_cause=EventCause.RACE_END),
+
+            EventCause.RACE_CONTROL_MESSAGE: lambda message: self._process_race_control_message(message=message)
         }
 
 
