@@ -106,10 +106,10 @@ class EventDetails(TypedDict):
         Events that only involve one driver (e.g. pit, out) will list the driver as the initiator
 
     position: int | None
-        Describes the latest position on the timing board - used for personal best lap, overtake, and qualifying stage classification events.
+        Describes the latest position on the timing board - used for personal best lap, overtake, provisional and qualifying stage classification events.
 
     lap_duration: float | None
-        The lap time, in seconds, for a personal best lap.
+        The lap time, in seconds - used for personal best lap, provisional and qualifying stage classification events.
 
     verdict: str | None
         The outcome of an incident.
@@ -144,7 +144,7 @@ class EventDetails(TypedDict):
         The number of the qualifying stage (1, 2) where drivers can be eliminated - used for qualifying stage classification events.
 
     eliminated: bool | None
-        Whether a driver was eliminated or advanced in a qualifying stage.
+        Whether a driver was eliminated or advanced in a qualifying stage - used for qualifying stage classification events.
     
     """
     lap_number: int | None
@@ -212,6 +212,9 @@ class EventsCollection(Collection):
 
     # Track latest driver locations
     driver_locations: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(dict))
+
+    # Track driver personal best times for qualifying
+    driver_personal_best_laps: dict[int, float] = field(default_factory=lambda: defaultdict(float))
 
     # Track latest driver positions
     driver_positions: dict[int, int] = field(default_factory=lambda: defaultdict(int))
@@ -392,6 +395,47 @@ class EventsCollection(Collection):
                     key="tyre_age_at_start",
                     value=tyre_age_at_start
                 )
+
+    
+    def _update_driver_personal_best_lap(
+            self,
+            driver_number: int,
+            value: float
+        ):
+        old_value = self.driver_personal_best_laps.get(driver_number)
+        if value != old_value:
+            self.driver_personal_best_laps[driver_number] = value
+
+
+    def _update_driver_personal_best_laps(self, message: Message) -> Iterator[Event]:
+        # Update driver personal best lap times using the latest values
+        timing_data = deep_get(obj=message.content, key="Lines")
+
+        if not isinstance(timing_data, dict):
+            return
+        
+        for driver_number, data in timing_data.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+
+            if not isinstance(data, dict):
+                continue
+
+            try:
+                best_lap_time = to_timedelta(str(data.get("BestLapTime", {}).get("Value"))).total_seconds()
+            except:
+                continue
+
+            try:
+                last_lap_time = to_timedelta(str(data.get("LastLapTime", {}).get("Value"))).total_seconds()
+            except:
+                continue
+
+            # Check for and compare lap times (up to thousandths precision)
+            if math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
+                self._update_driver_personal_best_lap(driver_number=driver_number, value=best_lap_time)
         
 
     def _update_driver_pit(
@@ -689,22 +733,22 @@ class EventsCollection(Collection):
                 continue
             
             try:
-                position = int(data.get("Position"))
-            except:
-                position = None
-
-            try:
                 best_lap_time = to_timedelta(str(data.get("BestLapTime", {}).get("Value"))).total_seconds()
             except:
-                best_lap_time = None
+                continue
 
             try:
                 last_lap_time = to_timedelta(str(data.get("LastLapTime", {}).get("Value"))).total_seconds()
             except:
-                last_lap_time = None
+                continue
+
+            try:
+                position = int(data.get("Position"))
+            except:
+                position = None
 
             # Check for and compare lap times (up to thousandths precision)
-            if position is not None and best_lap_time is not None and last_lap_time is not None and math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
+            if position is not None and math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
                 # If "Position" field exists and "BestLapTime" and "LastLapTime" values are equal,
                 # then driver has set a personal best lap resulting in a position change
                 details: EventDetails = {
@@ -723,7 +767,7 @@ class EventsCollection(Collection):
                     cause=EventCause.PERSONAL_BEST_LAP.value,
                     details=details
                 )
-            elif best_lap_time is not None and last_lap_time is not None and math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
+            elif math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
                 # If only "BestLapTime" and "LastLapTime" values are equal, then driver has set a personal best lap,
                 # but no change in position
                 details: EventDetails = {
@@ -968,9 +1012,11 @@ class EventsCollection(Collection):
     
     def _process_provisional_classification(self, message: Message) -> Iterator[Event]:
         # Create provisional classification events for all drivers just before session end
+        # Include personal best lap time for qualifying sessions only
         for driver_number, position in self.driver_positions.items():
             details: EventDetails = {
                 "position": position,
+                "lap_duration": self.driver_personal_best_laps.get(driver_number) if self.session_type in ["Practice", "Qualifying"] else None,
                 "driver_roles": {f"{driver_number}": "initiator"}
             }
 
@@ -1015,6 +1061,7 @@ class EventsCollection(Collection):
             
             details: EventDetails = {
                 "position": self.driver_positions.get(driver_number),
+                "lap_duration": self.driver_personal_best_laps.get(driver_number),
                 "qualifying_stage_number": current_qualifying_stage_number - 1, 
                 "eliminated": eliminated,
                 "driver_roles": {f"{driver_number}": "initiator"} 
@@ -1485,6 +1532,7 @@ class EventsCollection(Collection):
             case "TimingAppData":
                 self._update_driver_stints(message)
             case "TimingData":
+                self._update_driver_personal_best_laps(message)
                 self._update_driver_positions(message)
             case _:
                 pass
