@@ -17,7 +17,7 @@ from openf1.util.misc import deep_get, to_datetime, to_timedelta, add_timezone_i
     
 
 class EventCategory(str, Enum):
-    DRIVER_ACTION = "driver-action" # Actions by drivers - pit, out, overtakes, hotlaps, off-track (track limits violations), incidents
+    DRIVER_ACTION = "driver-action" # Actions by drivers - pit, out, overtakes, personal best laps, off-track (track limits violations), incidents
     DRIVER_NOTIFICATION = "driver-notification" # Race control messsages to drivers - blue flags, black flags, black and white flags, black and orange flags, incident verdicts
     SECTOR_NOTIFICATION = "sector-notification" # Green (sector clear), yellow, double-yellow flags
     TRACK_NOTIFICATION = "track-notification" # Green (track clear) flags, red flags, chequered flags, safety cars
@@ -27,7 +27,7 @@ class EventCategory(str, Enum):
 class EventCause(str, Enum):
     # Driver actions
     ELIMINATION = "elimination" # Used in qualifying sessions if a driver was eliminated in a qualifying stage (Q1, Q2, SQ1, SQ2)
-    HOTLAP = "hotlap" # Used in qualifying/practice sessions - personal best laps
+    PERSONAL_BEST_LAP = "personal-best-lap" # Used in qualifying/practice sessions - personal best laps
     INCIDENT = "incident" # Collisions, unsafe rejoin, safety car/start infringements, etc.
     OFF_TRACK = "off-track" # Track limits violations
     OUT = "out"
@@ -93,10 +93,10 @@ class EventDetails(TypedDict):
         Events that only involve one driver (e.g. pit, out) will list the driver as the initiator
 
     position: int | None
-        Describes the latest position on the timing board - used for hotlap, overtake, and elimination events.
+        Describes the latest position on the timing board - used for personal best lap, overtake, and elimination events.
 
     lap_duration: float | None
-        The lap time, in seconds, for a hotlap.
+        The lap time, in seconds, for a personal best lap.
 
     verdict: str | None
         The outcome of an incident.
@@ -116,10 +116,10 @@ class EventDetails(TypedDict):
         The full race control message for flag and incident events.
 
     compound: str | None
-        The tyre compound for hotlap and pit events.
+        The tyre compound for personal best lap and pit events.
 
     tyre_age_at_start: int | None
-        The number of laps for a tyre at the time of the event - used for hotlap and pit events.
+        The number of laps for a tyre at the time of the event - used for personal best lap and pit events.
 
     pit_lane_duration: float | None
         The total time spent in the pit lane, in seconds, for a pit.
@@ -523,77 +523,6 @@ class EventsCollection(Collection):
                 details=details
             )
 
-
-    def _process_hotlap(self, message: Message) -> Iterator[Event]:
-        timing_data = deep_get(obj=message.content, key="Lines")
-
-        if not isinstance(timing_data, dict):
-            return
-        
-        for driver_number, data in timing_data.items():
-            try:
-                driver_number = int(driver_number)
-            except:
-                continue
-
-            if not isinstance(data, dict):
-                continue
-            
-            try:
-                position = int(data.get("Position"))
-            except:
-                position = None
-
-            try:
-                best_lap_time = to_timedelta(str(data.get("BestLapTime", {}).get("Value"))).total_seconds()
-            except:
-                best_lap_time = None
-
-            try:
-                last_lap_time = to_timedelta(str(data.get("LastLapTime", {}).get("Value"))).total_seconds()
-            except:
-                last_lap_time = None
-
-            # Check for and compare lap times (up to thousandths precision)
-            if position is not None and best_lap_time is not None and last_lap_time is not None and math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
-                # If "Position" field exists and "BestLapTime" and "LastLapTime" values are equal,
-                # then driver has set a personal best lap resulting in a position change
-                details: EventDetails = {
-                    "driver_role": {f"{driver_number}": "initiator"},
-                    "position": position,
-                    "compound": self.driver_stints.get(driver_number, {}).get("compound"),
-                    "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
-                    "lap_duration": best_lap_time
-                }
-
-                yield Event(
-                    meeting_key=self.meeting_key,
-                    session_key=self.session_key,
-                    date=message.timepoint,
-                    category=EventCategory.DRIVER_ACTION.value,
-                    cause=EventCause.HOTLAP.value,
-                    details=details
-                )
-            elif best_lap_time is not None and last_lap_time is not None and math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
-                # If only "BestLapTime" and "LastLapTime" values are equal, then driver has set a personal best lap,
-                # but no change in position
-                details: EventDetails = {
-                    "driver_role": {f"{driver_number}": "initiator"},
-                    "position": None,
-                    "compound": self.driver_stints.get(driver_number, {}).get("compound"),
-                    "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
-                    "lap_duration": best_lap_time
-                }
-
-                yield Event(
-                    meeting_key=self.meeting_key,
-                    session_key=self.session_key,
-                    date=message.timepoint,
-                    category=EventCategory.DRIVER_ACTION.value,
-                    cause=EventCause.HOTLAP.value,
-                    details=details
-                )
-
     
     def _process_incident(self, message: Message) -> Iterator[Event]:
         race_control_message = deep_get(obj=message.content, key="Message")
@@ -828,6 +757,77 @@ class EventsCollection(Collection):
                 cause=EventCause.OVERTAKE.value,
                 details=details
             )
+
+    
+    def _process_personal_best_lap(self, message: Message) -> Iterator[Event]:
+        timing_data = deep_get(obj=message.content, key="Lines")
+
+        if not isinstance(timing_data, dict):
+            return
+        
+        for driver_number, data in timing_data.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+
+            if not isinstance(data, dict):
+                continue
+            
+            try:
+                position = int(data.get("Position"))
+            except:
+                position = None
+
+            try:
+                best_lap_time = to_timedelta(str(data.get("BestLapTime", {}).get("Value"))).total_seconds()
+            except:
+                best_lap_time = None
+
+            try:
+                last_lap_time = to_timedelta(str(data.get("LastLapTime", {}).get("Value"))).total_seconds()
+            except:
+                last_lap_time = None
+
+            # Check for and compare lap times (up to thousandths precision)
+            if position is not None and best_lap_time is not None and last_lap_time is not None and math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
+                # If "Position" field exists and "BestLapTime" and "LastLapTime" values are equal,
+                # then driver has set a personal best lap resulting in a position change
+                details: EventDetails = {
+                    "driver_role": {f"{driver_number}": "initiator"},
+                    "position": position,
+                    "compound": self.driver_stints.get(driver_number, {}).get("compound"),
+                    "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
+                    "lap_duration": best_lap_time
+                }
+
+                yield Event(
+                    meeting_key=self.meeting_key,
+                    session_key=self.session_key,
+                    date=message.timepoint,
+                    category=EventCategory.DRIVER_ACTION.value,
+                    cause=EventCause.PERSONAL_BEST_LAP.value,
+                    details=details
+                )
+            elif best_lap_time is not None and last_lap_time is not None and math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
+                # If only "BestLapTime" and "LastLapTime" values are equal, then driver has set a personal best lap,
+                # but no change in position
+                details: EventDetails = {
+                    "driver_role": {f"{driver_number}": "initiator"},
+                    "position": None,
+                    "compound": self.driver_stints.get(driver_number, {}).get("compound"),
+                    "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
+                    "lap_duration": best_lap_time
+                }
+
+                yield Event(
+                    meeting_key=self.meeting_key,
+                    session_key=self.session_key,
+                    date=message.timepoint,
+                    category=EventCategory.DRIVER_ACTION.value,
+                    cause=EventCause.PERSONAL_BEST_LAP.value,
+                    details=details
+                )
     
 
     def _process_pit(self, message: Message) -> Iterator[Event]:
@@ -1130,11 +1130,6 @@ class EventsCollection(Collection):
                 lambda: self.session_type == "Qualifying",
                 lambda: deep_get(obj=message.content, key="SessionPart") in [2, 3] # We only know the results of the previous stage after the next stage begins
             ]),
-            EventCause.HOTLAP: lambda message: all(cond() for cond in [
-                lambda: message.topic == "TimingData", 
-                lambda: self.session_type in ["Practice", "Qualifying"],
-                lambda: deep_get(obj=message.content, key="SessionPart") is None
-            ]),
             EventCause.INCIDENT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
                 lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
@@ -1156,6 +1151,11 @@ class EventsCollection(Collection):
                 lambda: self.session_type == "Race",
                 lambda: deep_get(obj=message.content, key="OvertakeState") is not None,
                 lambda: deep_get(obj=message.content, key="Position") is not None
+            ]),
+            EventCause.PERSONAL_BEST_LAP: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingData", 
+                lambda: self.session_type in ["Practice", "Qualifying"],
+                lambda: deep_get(obj=message.content, key="SessionPart") is None
             ]),
             EventCause.PIT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingAppData",
@@ -1336,11 +1336,11 @@ class EventsCollection(Collection):
     def _get_event_processing_map(self) -> dict[EventCause, Callable[..., Iterator[Event]]]:
         return {
             EventCause.ELIMINATION: lambda message: self._process_elimination(message),
-            EventCause.HOTLAP: lambda message: self._process_hotlap(message),
             EventCause.INCIDENT: lambda message: self._process_incident(message),
             EventCause.OFF_TRACK: lambda message: self._process_off_track(message),
             EventCause.OUT: lambda message: self._process_out(message),
             EventCause.OVERTAKE: lambda message: self._process_overtake(message),
+            EventCause.PERSONAL_BEST_LAP: lambda message: self._process_personal_best_lap(message),
             EventCause.PIT: lambda message: self._process_pit(message),
             
             EventCause.BLACK_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_FLAG),
