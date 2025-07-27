@@ -1,5 +1,7 @@
-import re
+import hashlib
+import json
 import math
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -14,14 +16,21 @@ from openf1.services.ingestor_livetiming.core.objects import (
     Message,
 )
 from openf1.util.misc import deep_get, to_datetime, to_timedelta, add_timezone_info
-    
+
+
+def _hash_obj(obj: dict) -> str:
+    """
+    Returns a SHA3-512 hashed value representing a dictionary.
+    """
+    return hashlib.sha3_512(json.dumps(obj=obj, sort_keys=True).encode("utf-8")).hexdigest()
+
 
 class EventCategory(str, Enum):
     DRIVER_ACTION = "driver-action" # Actions by drivers - pit, out, overtakes, personal best laps, off-track (track limits violations), incidents
     DRIVER_NOTIFICATION = "driver-notification" # Race control messsages to drivers - blue flags, black flags, black and white flags, black and orange flags, incident verdicts
     SECTOR_NOTIFICATION = "sector-notification" # Green (sector clear), yellow, double-yellow flags
     TRACK_NOTIFICATION = "track-notification" # Green (track clear) flags, red flags, chequered flags, safety cars
-    SESSION_NOTIFICATION = "session-notification" # Session start/end, qualifying stage start/end
+    SESSION_NOTIFICATION = "session-notification" # Session start/end/pause/resume, practice start/end, qualifying stage start/end, race start/end
 
 
 class EventCause(str, Enum):
@@ -88,7 +97,7 @@ class EventDetails(TypedDict):
 
     driver_roles: dict[str, Literal['initiator', 'participant']] | None
         Maps driver numbers to a role describing their involvement in the event:
-            - 'initiator' if the driver was the main reason for the event (e.g. causing an incident)
+            - 'initiator' if the driver is the main reason/is directly responsible for the event (e.g. causing an incident)
             - 'participant' if the driver is merely involved in the event (e.g. being overtaken, being the victim of an incident).
         Events that only involve one driver (e.g. pit, out) will list the driver as the initiator
 
@@ -144,7 +153,6 @@ class EventDetails(TypedDict):
     pit_lane_duration: float | None
     pit_stop_duration: float | None
     qualifying_stage_number: Literal[1, 2] | None
-    eliminated: bool | None
 
 
 @dataclass(eq=False)
@@ -160,7 +168,8 @@ class Event(Document):
     def unique_key(self) -> tuple:
         return (
             self.date,
-            self.cause
+            self.cause,
+            _hash_obj(self.details)
         )
 
 
@@ -507,11 +516,12 @@ class EventsCollection(Collection):
             eliminated = bool(data.get("KnockedOut")) or False
 
             if not eliminated:
-                return
+                continue
             
             details: EventDetails = {
                 "position": self.driver_positions.get(driver_number),
-                "qualifying_stage_number": current_qualifying_stage_number - 1 # Driver was eliminated in the previous qualifying stage 
+                "qualifying_stage_number": current_qualifying_stage_number - 1, # Driver was eliminated in the previous qualifying stage
+                "driver_roles": {f"{driver_number}": "initiator"} 
             }
 
             yield Event(
