@@ -101,7 +101,7 @@ class EventDetails(TypedDict):
 
     driver_roles: dict[str, Literal['initiator', 'participant']] | None
         Maps driver numbers to a role describing their involvement in the event:
-            - 'initiator' if the driver is the main reason/is directly responsible for the event (e.g. causing an incident)
+            - 'initiator' if the driver is the main subject or is directly responsible for the event (e.g. causing an incident)
             - 'participant' if the driver is merely involved in the event (e.g. being overtaken, being the victim of an incident).
         Events that only involve one driver (e.g. pit, out) will list the driver as the initiator
 
