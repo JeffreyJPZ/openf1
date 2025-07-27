@@ -26,7 +26,7 @@ def _hash_obj(obj: dict) -> str:
 
 
 class EventCategory(str, Enum):
-    DRIVER_ACTION = "driver-action" # Actions by drivers - pit, out, overtakes, personal best laps, off-track (track limits violations), incidents
+    DRIVER_ACTION = "driver-action" # Actions by drivers - pit, out, overtakes, personal best laps, track limits violations, incidents
     DRIVER_NOTIFICATION = "driver-notification" # Other events involving drivers - blue flags, black flags, black and white flags, black and orange flags, incident verdicts, qualifying stage classifications, provisional classifications
     SECTOR_NOTIFICATION = "sector-notification" # Green (sector clear), yellow, double-yellow flags
     TRACK_NOTIFICATION = "track-notification" # Green (track clear) flags, red flags, chequered flags, safety cars
@@ -37,7 +37,7 @@ class EventCause(str, Enum):
     # Driver actions
     PERSONAL_BEST_LAP = "personal-best-lap" # Used in qualifying/practice sessions - personal best laps
     INCIDENT = "incident" # Collisions, unsafe rejoin, safety car/start infringements, etc.
-    OFF_TRACK = "off-track" # Track limits violations
+    TRACK_LIMITS = "track-limits" # Track limits violations
     OUT = "out"
     OVERTAKE = "overtake"
     PIT = "pit"
@@ -577,66 +577,6 @@ class EventsCollection(Collection):
         )
     
 
-    def _process_off_track(self, message: Message) -> Iterator[Event]:
-        race_control_message = deep_get(obj=message.content, key="Message")
-
-        if not isinstance(race_control_message, str):
-            return
-        
-        try:
-            date = to_datetime(deep_get(obj=message.content, key="Utc"))
-            date = pytz.utc.localize(date)
-        except:
-            date = None
-
-        try:
-            lap_number = int(deep_get(obj=message.content, key="Lap"))
-        except:
-            lap_number = None
-        
-        # Extract track violation information from race control message
-        off_track_pattern = (
-            r"^"
-            r"CAR\s+(?P<driver_number>\d+).*?"      # Captures driver number
-            r"AT\s+(?P<marker>[A-Z0-9/\s]+)\s+"     # Captures marker
-            r"LAP\s+(?P<lap_number>\d+)\s+"         # Captures lap number
-            r"(?P<time>\b\d{1,2}:\d{2}:\d{2}\b).*"  # Captures local time
-            r"$"
-        )
-        match = re.search(pattern=off_track_pattern, string=race_control_message)
-
-        off_track_driver_number = int(match.group("driver_number")) if match.group("driver_number") is not None else None
-        off_track_marker = str(match.group("marker")) if match.group("marker") is not None else None
-        off_track_lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
-        off_track_time = str(match.group("time")) if match.group("time") is not None else None
-
-        try:
-            # Track limit violation time is local, need to convert to UTC
-            off_track_date = datetime.combine(
-                date=date.date(),
-                time=datetime.strptime(off_track_time, "%H:%M:%S").time()
-            )
-            off_track_date = add_timezone_info(dt=off_track_date, gmt_offset=self.session_offset)
-        except:
-            off_track_date = None
-
-        details: EventDetails = {
-            "lap_number": off_track_lap_number if off_track_lap_number is not None else lap_number, # Lap number for qualifying incidents is individual to driver
-            "marker": off_track_marker,
-            "message": race_control_message,
-            "driver_roles": {f"{off_track_driver_number}": "initiator"} if off_track_driver_number is not None else None
-        }
-
-        yield Event(
-            meeting_key=self.meeting_key,
-            session_key=self.session_key,
-            date=off_track_date,
-            category=EventCategory.DRIVER_ACTION.value,
-            cause=EventCause.OFF_TRACK.value,
-            details=details
-        )
-    
-
     def _process_outs(self, message: Message) -> Iterator[Event]:
         for driver_number, data in message.content.items():
             try:
@@ -852,6 +792,66 @@ class EventsCollection(Collection):
                 cause=EventCause.PIT.value,
                 details=details
             )
+
+    
+    def _process_track_limits(self, message: Message) -> Iterator[Event]:
+        race_control_message = deep_get(obj=message.content, key="Message")
+
+        if not isinstance(race_control_message, str):
+            return
+        
+        try:
+            date = to_datetime(deep_get(obj=message.content, key="Utc"))
+            date = pytz.utc.localize(date)
+        except:
+            date = None
+
+        try:
+            lap_number = int(deep_get(obj=message.content, key="Lap"))
+        except:
+            lap_number = None
+        
+        # Extract track limits violation information from race control message
+        track_limits_pattern = (
+            r"^"
+            r"CAR\s+(?P<driver_number>\d+).*?"      # Captures driver number
+            r"AT\s+(?P<marker>[A-Z0-9/\s]+)\s+"     # Captures marker
+            r"LAP\s+(?P<lap_number>\d+)\s+"         # Captures lap number
+            r"(?P<time>\b\d{1,2}:\d{2}:\d{2}\b).*"  # Captures local time
+            r"$"
+        )
+        match = re.search(pattern=track_limits_pattern, string=race_control_message)
+
+        track_limits_driver_number = int(match.group("driver_number")) if match.group("driver_number") is not None else None
+        track_limits_marker = str(match.group("marker")) if match.group("marker") is not None else None
+        track_limits_lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
+        track_limits_time = str(match.group("time")) if match.group("time") is not None else None
+
+        try:
+            # Track limits violation time is local, need to convert to UTC
+            track_limits_date = datetime.combine(
+                date=date.date(),
+                time=datetime.strptime(track_limits_time, "%H:%M:%S").time()
+            )
+            track_limits_date = add_timezone_info(dt=track_limits_date, gmt_offset=self.session_offset)
+        except:
+            track_limits_date = None
+
+        details: EventDetails = {
+            "lap_number": track_limits_lap_number if track_limits_lap_number is not None else lap_number, # Lap number for qualifying incidents is individual to driver
+            "marker": track_limits_marker,
+            "message": race_control_message,
+            "driver_roles": {f"{track_limits_driver_number}": "initiator"} if track_limits_driver_number is not None else None
+        }
+
+        yield Event(
+            meeting_key=self.meeting_key,
+            session_key=self.session_key,
+            date=track_limits_date,
+            category=EventCategory.DRIVER_ACTION.value,
+            cause=EventCause.TRACK_LIMITS.value,
+            details=details
+        )
 
 
     def _process_incident_verdict(self, message: Message) -> Iterator[Event]:
@@ -1200,11 +1200,6 @@ class EventsCollection(Collection):
                 lambda: "INCIDENT" in deep_get(obj=message.content, key="Message"),
                 lambda: "NOTED" in deep_get(obj=message.content, key="Message")
             ]),
-            EventCause.OFF_TRACK: lambda message: all(cond() for cond in [
-                lambda: message.topic == "RaceControlMessages",
-                lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
-                lambda: "TRACK LIMITS" in deep_get(obj=message.content, key="Message")
-            ]),
             EventCause.OUT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "DriverRaceInfo",
                 lambda: self.session_type == "Race",
@@ -1225,6 +1220,11 @@ class EventsCollection(Collection):
                 lambda: message.topic == "TimingAppData",
                 lambda: self.session_type == "Race",
                 lambda: isinstance(deep_get(obj=message.content, key="Compound"), str)
+            ]),
+            EventCause.TRACK_LIMITS: lambda message: all(cond() for cond in [
+                lambda: message.topic == "RaceControlMessages",
+                lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
+                lambda: "TRACK LIMITS" in deep_get(obj=message.content, key="Message")
             ]),
 
             EventCause.BLACK_FLAG: lambda message: all(cond() for cond in [
@@ -1415,11 +1415,11 @@ class EventsCollection(Collection):
     def _get_event_processing_map(self) -> dict[EventCause, Callable[..., Iterator[Event]]]:
         return {
             EventCause.INCIDENT: lambda message: self._process_incident(message),
-            EventCause.OFF_TRACK: lambda message: self._process_off_track(message),
             EventCause.OUT: lambda message: self._process_outs(message),
             EventCause.OVERTAKE: lambda message: self._process_overtakes(message),
             EventCause.PERSONAL_BEST_LAP: lambda message: self._process_personal_best_laps(message),
             EventCause.PIT: lambda message: self._process_pits(message),
+            EventCause.TRACK_LIMITS: lambda message: self._process_track_limits(message),
             
             EventCause.BLACK_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_FLAG),
             EventCause.BLACK_AND_ORANGE_FLAG: lambda message: self._process_driver_flag(message=message, event_cause=EventCause.BLACK_AND_ORANGE_FLAG),
