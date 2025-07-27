@@ -17,14 +17,16 @@ from openf1.util.misc import deep_get, to_datetime, to_timedelta, add_timezone_i
     
 
 class EventCategory(str, Enum):
-    DRIVER_ACTION = "driver-action" # Actions by drivers - pits, outs, overtakes, hotlaps, track limits violations, incidents
+    DRIVER_ACTION = "driver-action" # Actions by drivers - pit, out, overtakes, hotlaps, off-track (track limits violations), incidents
     DRIVER_NOTIFICATION = "driver-notification" # Race control messsages to drivers - blue flags, black flags, black and white flags, black and orange flags, incident verdicts
     SECTOR_NOTIFICATION = "sector-notification" # Green (sector clear), yellow, double-yellow flags
-    TRACK_NOTIFICATION = "track-notification" # Green (track clear) flags, red flags, chequered flags, safety cars, start of qualifying session parts
+    TRACK_NOTIFICATION = "track-notification" # Green (track clear) flags, red flags, chequered flags, safety cars
+    SESSION_NOTIFICATION = "session-notification" # Session start/end, qualifying stage start/end
 
 
 class EventCause(str, Enum):
     # Driver actions
+    ELIMINATION = "elimination" # Used in qualifying sessions if a driver was eliminated in a qualifying stage (Q1, Q2, SQ1, SQ2)
     HOTLAP = "hotlap" # Used in qualifying/practice sessions - personal best laps
     INCIDENT = "incident" # Collisions, unsafe rejoin, safety car/start infringements, etc.
     OFF_TRACK = "off-track" # Track limits violations
@@ -52,6 +54,22 @@ class EventCause(str, Enum):
     SAFETY_CAR_ENDING = "safety-car-ending"
     VIRTUAL_SAFETY_CAR_ENDING = "virtual-safety-car-ending"
 
+    # Session notifications
+    SESSION_START = "session-start"
+    SESSION_END = "session-end"
+    SESSION_STOP = "session-stop"
+    SESSION_RESUME = "session-resume"
+    PRACTICE_START = "practice-start"
+    PRACTICE_END = "practice-end"
+    Q1_START = "q1-start"
+    Q1_END = "q1-end"
+    Q2_START = "q2-start"
+    Q2_END = "q2-end"
+    Q3_START = "q3-start"
+    Q3_END = "q3-end"
+    RACE_START = "race-start"
+    RACE_END = "race-end"
+
 
 class EventDetails(TypedDict):
     """
@@ -75,7 +93,7 @@ class EventDetails(TypedDict):
         Events that only involve one driver (e.g. pit, out) will list the driver as the initiator
 
     position: int | None
-        Describes the updated position on the timing board for a hotlap or overtake event.
+        Describes the latest position on the timing board - used for hotlap, overtake, and elimination events.
 
     lap_duration: float | None
         The lap time, in seconds, for a hotlap.
@@ -108,6 +126,9 @@ class EventDetails(TypedDict):
 
     pit_stop_duration: float | None
         The total time spent stationary in the pit box, in seconds, for a pit.
+
+    qualifying_stage_number: Literal[1, 2] | None
+        The number of the qualifying stage (1, 2) where the driver was eliminated - used for elimination events.
     
     """
     lap_number: int | None
@@ -120,7 +141,10 @@ class EventDetails(TypedDict):
     message: str | None
     compound: str | None
     tyre_age_at_start: int | None
-    pit_duration: float | None
+    pit_lane_duration: float | None
+    pit_stop_duration: float | None
+    qualifying_stage_number: Literal[1, 2] | None
+    eliminated: bool | None
 
 
 @dataclass(eq=False)
@@ -150,6 +174,7 @@ class EventsCollection(Collection):
         "PitStopSeries", # New topic from 2025 onwards with stationary time for pit stops
         "Position.z",
         "RaceControlMessages",
+        "SessionData", # TODO: process
         "SessionInfo",
         "TimingAppData",
         "TimingData"
@@ -159,11 +184,20 @@ class EventsCollection(Collection):
     session_start: datetime = field(default=None)
     session_offset: str = field(default=None) # GMT offset
     session_type: Literal["Practice", "Qualifying", "Race"] = field(default=None)
+    session_status: Literal["Started", "Aborted", "Finished", "Ends"] = field(default=None) # Track session state to help create session notifications
+
     lap_number: int = field(default=None)
-    driver_positions: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(dict))
+    qualifying_stage_number: Literal[1, 2, 3] = field(default=None) # Track qualifying stage number to help create session notifications
+
     # Combine latest stint data with latest pit data for pit event - stint number should be one more than pit number
     driver_stints: dict[int, dict[Literal["compound", "tyre_age_at_start"], int | str]] = field(default_factory=lambda: defaultdict(dict))
     driver_pits: dict[int, dict[Literal["date", "pit_lane_duration", "pit_stop_duration", "lap_number"], datetime | float | int]] = field(default_factory=lambda: defaultdict(dict))
+
+    # Track latest driver locations
+    driver_locations: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(dict))
+
+    # Track latest driver positions
+    driver_positions: dict[int, int] = field(default_factory=lambda: defaultdict(int))
 
 
     def _update_lap_number(self, message: Message):
@@ -197,31 +231,56 @@ class EventsCollection(Collection):
         self.session_offset = gmt_offset
         self.session_type = session_type
 
+    
+    def _update_session_status(self, message: Message):
+        try:
+            session_status = str(deep_get(obj=message.content, key="SessionStatus"))
+        except:
+            return
+        
+        if session_status not in ["Started", "Aborted", "Finished", "Ends"]:
+            # Ignore "Inactive" status since it conflicts with event condition logic and "Finalised" status due to redundancy
+            return
+        
+        self.session_status = session_status
 
-    def _update_driver_position(
+    
+    def _update_qualifying_stage_number(self, message: Message):
+        try:
+            qualifying_stage_number = int(deep_get(obj=message.content, key="QualifyingPart"))
+        except:
+            return
+        
+        if qualifying_stage_number not in [1, 2, 3]:
+            return
+        
+        self.qualifying_stage_number = qualifying_stage_number
+
+
+    def _update_driver_location(
             self, driver_number: int,
             key: Literal["x", "y", "z"],
             value: int
         ):
-        driver_position = self.driver_positions[driver_number] 
+        driver_position = self.driver_locations[driver_number] 
         old_value = driver_position.get(key)
         if value != old_value:
             driver_position[key] = value
             
 
-    def _update_driver_positions(self, message: Message):
-        # Update driver positions using the latest values
-        positions = deep_get(obj=message.content, key="Position")
+    def _update_driver_locations(self, message: Message):
+        # Update driver locations using the latest values
+        locations = deep_get(obj=message.content, key="Position")
 
-        if not isinstance(positions, list):
+        if not isinstance(locations, list):
             return
         
-        latest_positions = positions[-1]
+        latest_locations = locations[-1]
 
-        if not isinstance(latest_positions, dict):
+        if not isinstance(latest_locations, dict):
             return
         
-        latest_entries = deep_get(obj=latest_positions, key="Entries")
+        latest_entries = deep_get(obj=latest_locations, key="Entries")
 
         if not isinstance(latest_entries, dict):
             return
@@ -242,17 +301,17 @@ class EventsCollection(Collection):
             except:
                 continue
 
-            self._update_driver_position(
+            self._update_driver_location(
                 driver_number=driver_number,
                 key="x",
                 value=x
             )
-            self._update_driver_position(
+            self._update_driver_location(
                 driver_number=driver_number,
                 key="y",
                 value=y
             )
-            self._update_driver_position(
+            self._update_driver_location(
                 driver_number=driver_number,
                 key="z",
                 value=z
@@ -386,6 +445,83 @@ class EventsCollection(Collection):
                     key="pit_stop_duration",
                     value=pit_stop_duration
                 )
+
+
+    def _update_driver_position(
+            self,
+            driver_number: int,
+            value: int
+        ):
+        old_value = self.driver_positions.get(driver_number)
+        if value != old_value:
+            self.driver_positions[driver_number] = value
+
+
+    def _update_driver_positions(self, message: Message):
+        # Update driver positions using the latest values
+        position_data = deep_get(obj=message.content, key="Lines")
+        
+        if not isinstance(position_data, dict):
+            return
+        
+        for driver_number, data in position_data.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+            
+            if not isinstance(data, dict):
+                continue
+
+            try:
+                position = int(data.get("Position"))
+            except:
+                continue
+            
+            self._update_driver_position(driver_number=driver_number, value=position)
+
+    
+    def _process_elimination(self, message: Message) -> Iterator[Event]:
+        try:
+            current_qualifying_stage_number = int(deep_get(obj=message.content, key="SessionPart"))
+        except:
+            return
+        
+        if current_qualifying_stage_number not in [2, 3]:
+            return
+        
+        driver_status_data = deep_get(obj=message.content, key="Lines")
+
+        if not isinstance(driver_status_data, dict):
+            return
+        
+        for driver_number, data in driver_status_data.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+            
+            if not isinstance(data, dict):
+                continue
+
+            eliminated = bool(data.get("KnockedOut")) or False
+
+            if not eliminated:
+                return
+            
+            details: EventDetails = {
+                "position": self.driver_positions.get(driver_number),
+                "qualifying_stage_number": current_qualifying_stage_number - 1 # Driver was eliminated in the previous qualifying stage 
+            }
+
+            yield Event(
+                meeting_key=self.meeting_key,
+                session_key=self.session_key,
+                date=message.timepoint,
+                category=EventCategory.DRIVER_ACTION.value,
+                cause=EventCause.ELIMINATION.value,
+                details=details
+            )
 
 
     def _process_hotlap(self, message: Message) -> Iterator[Event]:
@@ -545,6 +681,12 @@ class EventsCollection(Collection):
             return
         
         try:
+            date = to_datetime(deep_get(obj=message.content, key="Utc"))
+            date = pytz.utc.localize(date)
+        except:
+            date = None
+
+        try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
         except:
             lap_number = None
@@ -567,13 +709,13 @@ class EventsCollection(Collection):
 
         try:
             # Track limit violation time is local, need to convert to UTC
-            date = datetime.combine(
-                date=self.session_start.date(),
+            off_track_date = datetime.combine(
+                date=date.date(),
                 time=datetime.strptime(off_track_time, "%H:%M:%S").time()
             )
-            date = add_timezone_info(dt=date, gmt_offset=self.session_offset)
+            off_track_date = add_timezone_info(dt=off_track_date, gmt_offset=self.session_offset)
         except:
-            date = None
+            off_track_date = None
 
         details: EventDetails = {
             "lap_number": off_track_lap_number if off_track_lap_number is not None else lap_number, # Lap number for qualifying incidents is individual to driver
@@ -585,7 +727,7 @@ class EventsCollection(Collection):
         yield Event(
             meeting_key=self.meeting_key,
             session_key=self.session_key,
-            date=date,
+            date=off_track_date,
             category=EventCategory.DRIVER_ACTION.value,
             cause=EventCause.OFF_TRACK.value,
             details=details
@@ -608,9 +750,9 @@ class EventsCollection(Collection):
             details: EventDetails = {
                 "lap_number": self.lap_number,
                 "marker": {
-                    "x": self.driver_positions.get(driver_number, {}).get("x"),
-                    "y": self.driver_positions.get(driver_number, {}).get("y"),
-                    "z": self.driver_positions.get(driver_number, {}).get("z")
+                    "x": self.driver_locations.get(driver_number, {}).get("x"),
+                    "y": self.driver_locations.get(driver_number, {}).get("y"),
+                    "z": self.driver_locations.get(driver_number, {}).get("z")
                 },
                 "driver_roles": {f"{driver_number}": "initiator"}
             }
@@ -670,9 +812,9 @@ class EventsCollection(Collection):
             details: EventDetails = {
                 "lap_number": self.lap_number,
                 "marker": {
-                    "x": self.driver_positions.get(overtaking_driver_number, {}).get("x"),
-                    "y": self.driver_positions.get(overtaking_driver_number, {}).get("y"),
-                    "z": self.driver_positions.get(overtaking_driver_number, {}).get("z")
+                    "x": self.driver_locations.get(overtaking_driver_number, {}).get("x"),
+                    "y": self.driver_locations.get(overtaking_driver_number, {}).get("y"),
+                    "z": self.driver_locations.get(overtaking_driver_number, {}).get("z")
                 },
                 "position": overtake_position,
                 "driver_roles": driver_roles
@@ -736,7 +878,7 @@ class EventsCollection(Collection):
                 cause=EventCause.PIT.value,
                 details=details
             )
-    
+
 
     def _process_incident_verdict(self, message: Message) -> Iterator[Event]:
         race_control_message = deep_get(obj=message.content, key="Message")
@@ -965,10 +1107,29 @@ class EventsCollection(Collection):
         )
 
 
+    def _process_session_notification(self, message: Message, event_cause: EventCause) -> Iterator[Event]:
+        yield Event(
+            meeting_key=self.meeting_key,
+            session_key=self.session_key,
+            date=message.timepoint,
+            category=EventCategory.SESSION_NOTIFICATION.value,
+            cause=event_cause.value,
+            details=None
+        )
+
+        # Update session status with new session status
+        self._update_session_status(message)
+
+
     # Maps event causes to unique conditions that determine if event messages belong to that cause
     # message should be of type Message
     def _get_event_condition_map(self) -> dict[EventCause, Callable[..., bool]]:
         return {
+            EventCause.ELIMINATION: lambda message: all(cond() for cond in [
+                lambda: message.topic == "TimingData", 
+                lambda: self.session_type == "Qualifying",
+                lambda: deep_get(obj=message.content, key="SessionPart") in [2, 3] # We only know the results of the previous stage after the next stage begins
+            ]),
             EventCause.HOTLAP: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData", 
                 lambda: self.session_type in ["Practice", "Qualifying"],
@@ -1078,6 +1239,94 @@ class EventsCollection(Collection):
                 lambda: deep_get(obj=message.content, key="Category") == "SafetyCar",
                 lambda: deep_get(obj=message.content, key="Mode") == "VIRTUAL SAFETY CAR",
                 lambda: deep_get(obj=message.content, key="Status") == "ENDING"
+            ]),
+
+            EventCause.SESSION_START: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_status is None,
+                lambda: isinstance(deep_get(obj=message.content, key="Series"), list), # First session status message always has empty series list
+                lambda: len(deep_get(obj=message.content, key="Series")) == 0
+            ]),
+            EventCause.SESSION_END: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_status is not None,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Ends"
+            ]),
+            EventCause.SESSION_STOP: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_status is not None,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Aborted"
+            ]),
+            EventCause.SESSION_RESUME: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_status == "Aborted", # Prev session status
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Started"
+            ]),
+            EventCause.PRACTICE_START: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_type == "Practice",
+                lambda: self.session_status is None,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Started"
+            ]),
+            EventCause.PRACTICE_END: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_type == "Practice",
+                lambda: self.session_status is not None,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Finished"
+            ]),
+            EventCause.Q1_START: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_type == "Qualifying",
+                lambda: self.session_status is None,
+                lambda: self.qualifying_stage_number == 1,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Started"
+            ]),
+            EventCause.Q1_END: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_type == "Qualifying",
+                lambda: self.session_status is not None,
+                lambda: self.qualifying_stage_number == 1,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Finished"
+            ]),
+            EventCause.Q2_START: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_type == "Qualifying",
+                lambda: self.session_status == "Finished", # Prev session status
+                lambda: self.qualifying_stage_number == 2,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Started"
+            ]),
+            EventCause.Q2_END: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_type == "Qualifying",
+                lambda: self.session_status is not None,
+                lambda: self.qualifying_stage_number == 2,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Finished"
+            ]),
+            EventCause.Q3_START: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_type == "Qualifying",
+                lambda: self.session_status == "Finished", # Prev session status
+                lambda: self.qualifying_stage_number == 3,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Started"
+            ]),
+            EventCause.Q3_END: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_type == "Qualifying",
+                lambda: self.session_status is not None,
+                lambda: self.qualifying_stage_number == 3,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Finished"
+            ]),
+            EventCause.RACE_START: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_type == "Race",
+                lambda: self.session_status is None,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Started"
+            ]),
+            EventCause.RACE_END: lambda message: all(cond() for cond in [
+                lambda: message.topic == "SessionData",
+                lambda: self.session_type == "Race",
+                lambda: self.session_status is not None,
+                lambda: deep_get(obj=message.content, key="SessionStatus") == "Finished"
             ])
         }
 
@@ -1086,6 +1335,7 @@ class EventsCollection(Collection):
     # message should be of type Message
     def _get_event_processing_map(self) -> dict[EventCause, Callable[..., Iterator[Event]]]:
         return {
+            EventCause.ELIMINATION: lambda message: self._process_elimination(message),
             EventCause.HOTLAP: lambda message: self._process_hotlap(message),
             EventCause.INCIDENT: lambda message: self._process_incident(message),
             EventCause.OFF_TRACK: lambda message: self._process_off_track(message),
@@ -1112,12 +1362,26 @@ class EventsCollection(Collection):
             EventCause.SAFETY_CAR_DEPLOYED: lambda message: self._process_track_flag(message=message, event_cause=EventCause.SAFETY_CAR_DEPLOYED),
             EventCause.VIRTUAL_SAFETY_CAR_DEPLOYED: lambda message: self._process_track_flag(message=message, event_cause=EventCause.VIRTUAL_SAFETY_CAR_DEPLOYED),
             EventCause.SAFETY_CAR_ENDING: lambda message: self._process_track_flag(message=message, event_cause=EventCause.SAFETY_CAR_ENDING),
-            EventCause.VIRTUAL_SAFETY_CAR_ENDING: lambda message: self._process_track_flag(message=message, event_cause=EventCause.VIRTUAL_SAFETY_CAR_ENDING)
+            EventCause.VIRTUAL_SAFETY_CAR_ENDING: lambda message: self._process_track_flag(message=message, event_cause=EventCause.VIRTUAL_SAFETY_CAR_ENDING),
+
+            EventCause.SESSION_START: lambda message: self._process_session_notification(message=message, event_cause=EventCause.SESSION_START),
+            EventCause.SESSION_END: lambda message: self._process_session_notification(message=message, event_cause=EventCause.SESSION_END),
+            EventCause.SESSION_STOP: lambda message: self._process_session_notification(message=message, event_cause=EventCause.SESSION_STOP),
+            EventCause.SESSION_RESUME: lambda message: self._process_session_notification(message=message, event_cause=EventCause.SESSION_RESUME),
+            EventCause.PRACTICE_START: lambda message: self._process_session_notification(message=message, event_cause=EventCause.PRACTICE_START),
+            EventCause.PRACTICE_END: lambda message: self._process_session_notification(message=message, event_cause=EventCause.PRACTICE_END),
+            EventCause.Q1_START: lambda message: self._process_session_notification(message=message, event_cause=EventCause.Q1_START),
+            EventCause.Q1_END: lambda message: self._process_session_notification(message=message, event_cause=EventCause.Q1_END),
+            EventCause.Q2_START: lambda message: self._process_session_notification(message=message, event_cause=EventCause.Q2_START),
+            EventCause.Q2_END: lambda message: self._process_session_notification(message=message, event_cause=EventCause.Q2_END),
+            EventCause.Q3_START: lambda message: self._process_session_notification(message=message, event_cause=EventCause.Q3_START),
+            EventCause.Q3_END: lambda message: self._process_session_notification(message=message, event_cause=EventCause.Q3_END),
+            EventCause.RACE_START: lambda message: self._process_session_notification(message=message, event_cause=EventCause.RACE_START),
+            EventCause.RACE_END: lambda message: self._process_session_notification(message=message, event_cause=EventCause.RACE_END)
         }
 
 
     def process_message(self, message: Message) -> Iterator[Event]:
-
         match (message.topic):
             case "LapCount":
                 self._update_lap_number(message)
@@ -1130,11 +1394,16 @@ class EventsCollection(Collection):
                 if self.session_start is not None and self.session_start.year >= 2025:
                     self._update_driver_pits(message)
             case "Position.z":
-                self._update_driver_positions(message)
+                self._update_driver_locations(message)
+            case "SessionData":
+                if self.session_type == "Qualifying":
+                    self._update_qualifying_stage_number(message)
             case "SessionInfo":
                 self._update_session_info(message)
             case "TimingAppData":
                 self._update_driver_stints(message)
+            case "TimingData":
+                self._update_driver_positions(message)
             case _:
                 pass
             
