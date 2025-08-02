@@ -200,7 +200,10 @@ class EventsCollection(Collection):
     # Used to select between the old "PitLaneTimeCollection" and new "PitStopSeries" pit data topic,
     # where the new topic contains pit stationary time and first appears during the 2024 US GP weekend,
     # only for races
-    NEW_RACE_PIT_TOPIC_CUTOFF_DATE: ClassVar[datetime] = datetime(year=2024, month=10, day=18)
+    NEW_RACE_PIT_TOPIC_CUTOFF_DATE: ClassVar[datetime] = add_timezone_info(
+        dt=datetime(year=2024, month=10, day=18, hour=12, minute=30, second=0),
+        gmt_offset="-05:00:00"
+    )
 
     # Since messages are sorted by timepoint and then by topic we only need to keep the most recent data from other topics?
     session_start: datetime = field(default=None)
