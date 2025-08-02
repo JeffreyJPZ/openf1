@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Callable, Iterator, Literal, TypedDict
+from typing import Callable, ClassVar, Iterator, Literal, TypedDict
 
 import pytz
 
@@ -196,7 +196,12 @@ class EventsCollection(Collection):
         "TimingAppData",
         "TimingData"
     }
-    
+
+    # Used to select between the old "PitLaneTimeCollection" and new "PitStopSeries" pit data topic,
+    # where the new topic contains pit stationary time and first appears during the 2024 US GP weekend,
+    # only for races
+    NEW_RACE_PIT_TOPIC_CUTOFF_DATE: ClassVar[datetime] = datetime(year=2024, month=10, day=18)
+
     # Since messages are sorted by timepoint and then by topic we only need to keep the most recent data from other topics?
     session_start: datetime = field(default=None)
     session_offset: str = field(default=None) # GMT offset
@@ -1519,12 +1524,12 @@ class EventsCollection(Collection):
             case "LapCount":
                 self._update_lap_number(message)
             case "PitLaneTimeCollection":
-                # Use "PitLaneTimeCollection" topic for seasons before 2025
-                if self.session_start is not None and self.session_start.year < 2025:
+                # Use "PitLaneTimeCollection" topic for sessions before the 2024 US GP weekend or for non-races afterward
+                if self.session_type != "Race" or (self.session_start is not None and self.session_start < self.NEW_RACE_PIT_TOPIC_CUTOFF_DATE):
                     self._update_driver_pits(message)
             case "PitStopSeries":
-                # Use "PitStopSeries" topic from 2025 onwards
-                if self.session_start is not None and self.session_start.year >= 2025:
+                # Use "PitStopSeries" topic from the 2024 US GP afterward for races only
+                if self.session_type == "Race" and (self.session_start is not None and self.session_start >= self.NEW_RACE_PIT_TOPIC_CUTOFF_DATE):
                     self._update_driver_pits(message)
             case "Position.z":
                 self._update_driver_locations(message)
