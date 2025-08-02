@@ -129,10 +129,10 @@ class EventDetails(TypedDict):
         The full race control message for flag and incident events.
 
     compound: str | None
-        The tyre compound for personal best lap and pit events.
+        The tyre compound for personal best lap, pit, provisional and qualifying stage classification events.
 
     tyre_age_at_start: int | None
-        The number of laps for a tyre at the time of the event - used for personal best lap and pit events.
+        The number of laps for a tyre at the time of the event - used for personal best lap, pit, provisional and qualifying stage classification events.
 
     pit_lane_duration: float | None
         The total time spent in the pit lane, in seconds, for a pit.
@@ -606,9 +606,9 @@ class EventsCollection(Collection):
         details: EventDetails = {
             "lap_number": incident_lap_number if incident_lap_number is not None else lap_number,
             "marker": incident_marker,
+            "driver_roles": driver_roles,
             "reason": incident_reason,
-            "message": race_control_message,
-            "driver_roles": driver_roles
+            "message": race_control_message
         }
 
         yield Event(
@@ -703,8 +703,8 @@ class EventsCollection(Collection):
                     "y": self.driver_locations.get(overtaking_driver_number, {}).get("y"),
                     "z": self.driver_locations.get(overtaking_driver_number, {}).get("z")
                 },
-                "position": overtake_position,
-                "driver_roles": driver_roles
+                "driver_roles": driver_roles,
+                "position": overtake_position
             }
 
             yield Event(
@@ -752,11 +752,11 @@ class EventsCollection(Collection):
                 # If "Position" field exists and "BestLapTime" and "LastLapTime" values are equal,
                 # then driver has set a personal best lap resulting in a position change
                 details: EventDetails = {
-                    "driver_role": {f"{driver_number}": "initiator"},
+                    "driver_roles": {f"{driver_number}": "initiator"},
                     "position": position,
+                    "lap_duration": best_lap_time,
                     "compound": self.driver_stints.get(driver_number, {}).get("compound"),
-                    "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
-                    "lap_duration": best_lap_time
+                    "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start")
                 }
 
                 yield Event(
@@ -771,11 +771,11 @@ class EventsCollection(Collection):
                 # If only "BestLapTime" and "LastLapTime" values are equal, then driver has set a personal best lap,
                 # but no change in position
                 details: EventDetails = {
-                    "driver_role": {f"{driver_number}": "initiator"},
+                    "driver_roles": {f"{driver_number}": "initiator"},
                     "position": None,
+                    "lap_duration": best_lap_time,
                     "compound": self.driver_stints.get(driver_number, {}).get("compound"),
-                    "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
-                    "lap_duration": best_lap_time
+                    "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start")
                 }
 
                 yield Event(
@@ -884,8 +884,8 @@ class EventsCollection(Collection):
         details: EventDetails = {
             "lap_number": track_limits_lap_number if track_limits_lap_number is not None else lap_number, # Lap number for qualifying incidents is individual to driver
             "marker": track_limits_marker,
-            "message": race_control_message,
-            "driver_roles": {f"{track_limits_driver_number}": "initiator"} if track_limits_driver_number is not None else None
+            "driver_roles": {f"{track_limits_driver_number}": "initiator"} if track_limits_driver_number is not None else None,
+            "message": race_control_message
         }
 
         yield Event(
@@ -969,10 +969,10 @@ class EventsCollection(Collection):
             details: EventDetails = {
                 "lap_number": incident_verdict_lap_number if incident_verdict_lap_number is not None else lap_number,
                 "marker": incident_verdict_marker,
+                "driver_roles": driver_roles,
                 "verdict": incident_verdict,
                 "reason": incident_verdict_reason,
-                "message": race_control_message,
-                "driver_roles": driver_roles
+                "message": race_control_message
             }
 
             yield Event(
@@ -994,10 +994,10 @@ class EventsCollection(Collection):
             details: EventDetails = {
                 "lap_number": None,
                 "marker": None,
+                "driver_roles": {f"{incident_verdict_driver_number}": "initiator"} if incident_verdict_driver_number is not None else None,
                 "verdict": incident_verdict,
                 "reason": incident_verdict_reason,
-                "message": race_control_message,
-                "driver_roles": {f"{incident_verdict_driver_number}": "initiator"} if incident_verdict_driver_number is not None else None
+                "message": race_control_message
             }
 
             yield Event(
@@ -1015,9 +1015,11 @@ class EventsCollection(Collection):
         # Include personal best lap time for qualifying sessions only
         for driver_number, position in self.driver_positions.items():
             details: EventDetails = {
+                "driver_roles": {f"{driver_number}": "initiator"},
                 "position": position,
                 "lap_duration": self.driver_personal_best_laps.get(driver_number) if self.session_type in ["Practice", "Qualifying"] else None,
-                "driver_roles": {f"{driver_number}": "initiator"}
+                "compound": self.driver_stints.get(driver_number, {}).get("compound") if self.session_type in ["Practice", "Qualifying"] else None,
+                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start") if self.session_type in ["Practice", "Qualifying"] else None
             }
 
             yield Event(
@@ -1060,11 +1062,13 @@ class EventsCollection(Collection):
             eliminated = bool(data.get("KnockedOut")) or False
             
             details: EventDetails = {
+                "driver_roles": {f"{driver_number}": "initiator"},
                 "position": self.driver_positions.get(driver_number),
                 "lap_duration": self.driver_personal_best_laps.get(driver_number),
+                "compound": self.driver_stints.get(driver_number, {}).get("compound"),
+                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
                 "qualifying_stage_number": current_qualifying_stage_number - 1, 
-                "eliminated": eliminated,
-                "driver_roles": {f"{driver_number}": "initiator"} 
+                "eliminated": eliminated
             }
 
             yield Event(
@@ -1107,8 +1111,8 @@ class EventsCollection(Collection):
 
         details: EventDetails = {
             "lap_number": lap_number,
-            "message": race_control_message,
-            "driver_roles": {f"{driver_number}": "initiator"} if driver_number is not None else None
+            "driver_roles": {f"{driver_number}": "initiator"} if driver_number is not None else None,
+            "message": race_control_message
         }
 
         yield Event(
