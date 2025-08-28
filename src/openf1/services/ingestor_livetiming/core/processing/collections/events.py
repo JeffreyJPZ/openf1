@@ -196,7 +196,7 @@ class EventsCollection(Collection):
         "DriverRaceInfo",
         "LapCount",
         "PitLaneTimeCollection",
-        "PitStopSeries", # New topic from 2025 onwards with stationary time for pit stops
+        "PitStopSeries", # New topic with stationary time for pit stops
         "Position.z",
         "RaceControlMessages",
         "SessionData",
