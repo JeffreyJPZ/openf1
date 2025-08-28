@@ -25,6 +25,31 @@ def _hash_obj(obj: dict) -> str:
     return hashlib.sha3_512(json.dumps(obj=obj, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _parse_time_delta(time_delta: str | float | None) -> str | float | None:
+    if time_delta is None or time_delta == "":
+        return None
+
+    # Handle leader
+    if str(time_delta).upper().startswith("LAP"):
+        return 0.0
+
+    if str(time_delta).startswith("+"):
+        # Handle cases like '+1 LAP'
+        if "LAP" in time_delta:
+            return time_delta
+
+        # Handle cases like '+1:09.473'
+        elif ":" in time_delta:
+            minutes, seconds = map(float, time_delta[1:].split(":"))
+            return minutes * 60 + seconds
+
+        # Handle cases like '+6.924'
+        else:
+            return float(time_delta[1:])
+
+    return time_delta
+
+
 class EventCategory(str, Enum):
     DRIVER_ACTION = "driver-action" # Actions by drivers - pit, out, overtakes, personal best laps, track limits violations, incidents
     DRIVER_NOTIFICATION = "driver-notification" # Other events involving drivers - blue flags, black flags, black and white flags, black and orange flags, incident verdicts, qualifying stage classifications, provisional classifications
@@ -584,8 +609,8 @@ class EventsCollection(Collection):
             if not isinstance(data, dict):
                 continue
             
-            gap_to_leader = self._parse_time_delta(data.get("Gap"))
-            interval = self._parse_time_delta(data.get("Interval"))
+            gap_to_leader = _parse_time_delta(data.get("Gap"))
+            interval = _parse_time_delta(data.get("Interval"))
 
             if gap_to_leader is None and interval is None:
                 # Not a gap message
@@ -604,31 +629,6 @@ class EventsCollection(Collection):
                     key="interval",
                     value=interval
                 )
-    
-
-    def _parse_time_delta(time_delta: str | float | None) -> str | float | None:
-        if time_delta is None or time_delta == "":
-            return None
-
-        # Handle leader
-        if str(time_delta).upper().startswith("LAP"):
-            return 0.0
-
-        if str(time_delta).startswith("+"):
-            # Handle cases like '+1 LAP'
-            if "LAP" in time_delta:
-                return time_delta
-
-            # Handle cases like '+1:09.473'
-            elif ":" in time_delta:
-                minutes, seconds = map(float, time_delta[1:].split(":"))
-                return minutes * 60 + seconds
-
-            # Handle cases like '+6.924'
-            else:
-                return float(time_delta[1:])
-
-        return time_delta
 
     
     def _process_incident(self, message: Message) -> Iterator[Event]:
