@@ -160,3 +160,24 @@ def query_params_to_mongo_filters(
         key: {COMPARISON_OPERATORS_TO_MONGO[param.op]: param.value for param in params}
         for key, params in query_params.items()
     }
+
+
+def query_params_raw_items_to_raw_dict(query_params_raw_items: list[list[str]]) -> dict[str, list[str]]:
+    """
+    Given a list of query param key-value pairs,
+    create a mapping of query param keys to all associated values.
+
+    Examples:
+        [["driver_number", "1"]] --> {"driver_number": ["1"]}
+        [["driver_number", "4"], ["driver_number", "81"]] --> {"driver_number": ["4", "81"]}
+        [["driver_number", "16"], ["position", "20"]] --> {"driver_number": ["16"], "position": ["20"]}
+    """
+    query_params_raw_dict = defaultdict(list)
+
+    for item in query_params_raw_items:
+        key = item[0]
+        value = item[1]
+
+        query_params_raw_dict[key].append(value)
+    
+    return dict(query_params_raw_dict)
