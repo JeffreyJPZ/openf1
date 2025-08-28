@@ -1071,7 +1071,7 @@ class EventsCollection(Collection):
             
             details: EventDetails = {
                 "driver_roles": {f"{driver_number}": "initiator"},
-                "position": self.driver_gaps.get(driver_number),
+                "position": self.driver_positions.get(driver_number),
                 "lap_duration": self.driver_personal_best_laps.get(driver_number),
                 "compound": self.driver_stints.get(driver_number, {}).get("compound"),
                 "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
@@ -1545,7 +1545,7 @@ class EventsCollection(Collection):
                 self._update_driver_stints(message)
             case "TimingData":
                 self._update_driver_personal_best_laps(message)
-                self._update_driver_gaps(message)
+                self._update_driver_positions(message)
             case _:
                 pass
             
