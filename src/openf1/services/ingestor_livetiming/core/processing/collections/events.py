@@ -128,6 +128,12 @@ class EventDetails(TypedDict):
     message: str | None
         The full race control message for flag and incident events.
 
+    gap_to_leader: str | float | None
+        The time gap to the race leader - used for provisional classification events.
+
+    interval: str | float | None
+        The time gap to the driver in front - used for provisional classification events.
+
     compound: str | None
         The tyre compound for personal best lap, pit, provisional and qualifying stage classification events.
 
@@ -155,6 +161,8 @@ class EventDetails(TypedDict):
     verdict: str | None
     reason: str | None
     message: str | None
+    gap_to_leader: str | float | None
+    interval: str | float | None
     compound: str | None
     tyre_age_at_start: int | None
     pit_lane_duration: float | None
@@ -226,6 +234,9 @@ class EventsCollection(Collection):
 
     # Track latest driver positions
     driver_positions: dict[int, int] = field(default_factory=lambda: defaultdict(int))
+
+    # Track latest driver gaps
+    driver_gaps: dict[int, dict[Literal["gap_to_leader", "interval"], str | float]] = field(default_factory=lambda: defaultdict(dict))
 
 
     def _update_lap_number(self, message: Message):
@@ -548,6 +559,76 @@ class EventsCollection(Collection):
                 continue
             
             self._update_driver_position(driver_number=driver_number, value=position)
+    
+
+    def _update_driver_gap(
+            self,
+            driver_number: int,
+            key: Literal["gap_to_leader", "interval"],
+            value: str | float
+        ):
+        driver_gap = self.driver_gaps[driver_number]
+        old_value = driver_gap.get(key)
+        if value != old_value:
+            driver_gap[key] = value
+
+
+    def _update_driver_gaps(self, message: Message):
+        # Update driver gaps using the latest values
+        for driver_number, data in message.content.items():
+            try:
+                driver_number = int(driver_number)
+            except:
+                continue
+            
+            if not isinstance(data, dict):
+                continue
+            
+            gap_to_leader = self._parse_time_delta(data.get("Gap"))
+            interval = self._parse_time_delta(data.get("Interval"))
+
+            if gap_to_leader is None and interval is None:
+                # Not a gap message
+                continue
+
+            if gap_to_leader is not None:
+                self._update_driver_gap(
+                    driver_number=driver_number,
+                    key="gap_to_leader",
+                    value=gap_to_leader
+                )
+
+            if interval is not None:
+                self._update_driver_gap(
+                    driver_number=driver_number,
+                    key="interval",
+                    value=interval
+                )
+    
+
+    def _parse_time_delta(time_delta: str | float | None) -> str | float | None:
+        if time_delta is None or time_delta == "":
+            return None
+
+        # Handle leader
+        if str(time_delta).upper().startswith("LAP"):
+            return 0.0
+
+        if str(time_delta).startswith("+"):
+            # Handle cases like '+1 LAP'
+            if "LAP" in time_delta:
+                return time_delta
+
+            # Handle cases like '+1:09.473'
+            elif ":" in time_delta:
+                minutes, seconds = map(float, time_delta[1:].split(":"))
+                return minutes * 60 + seconds
+
+            # Handle cases like '+6.924'
+            else:
+                return float(time_delta[1:])
+
+        return time_delta
 
     
     def _process_incident(self, message: Message) -> Iterator[Event]:
@@ -1025,9 +1106,11 @@ class EventsCollection(Collection):
             details: EventDetails = {
                 "driver_roles": {f"{driver_number}": "initiator"},
                 "position": position,
-                "lap_duration": self.driver_personal_best_laps.get(driver_number) if self.session_type in ["Practice", "Qualifying"] else None,
-                "compound": self.driver_stints.get(driver_number, {}).get("compound") if self.session_type in ["Practice", "Qualifying"] else None,
-                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start") if self.session_type in ["Practice", "Qualifying"] else None
+                "gap_to_leader": self.driver_gaps.get(driver_number, {}).get("gap_to_leader") if self.session_type == "Race" else None,
+                "interval": self.driver_gaps.get(driver_number, {}).get("interval") if self.session_type == "Race" else None,
+                "lap_duration": self.driver_personal_best_laps.get(driver_number) if self.session_type in ("Practice", "Qualifying") else None,
+                "compound": self.driver_stints.get(driver_number, {}).get("compound") if self.session_type in ("Practice", "Qualifying") else None,
+                "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start") if self.session_type in ("Practice", "Qualifying") else None
             }
 
             yield Event(
@@ -1071,7 +1154,7 @@ class EventsCollection(Collection):
             
             details: EventDetails = {
                 "driver_roles": {f"{driver_number}": "initiator"},
-                "position": self.driver_positions.get(driver_number),
+                "position": self.driver_gaps.get(driver_number),
                 "lap_duration": self.driver_personal_best_laps.get(driver_number),
                 "compound": self.driver_stints.get(driver_number, {}).get("compound"),
                 "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
@@ -1524,6 +1607,8 @@ class EventsCollection(Collection):
 
     def process_message(self, message: Message) -> Iterator[Event]:
         match (message.topic):
+            case "DriverRaceInfo":
+                self._update_driver_gaps(message)
             case "LapCount":
                 self._update_lap_number(message)
             case "PitLaneTimeCollection":
@@ -1545,7 +1630,7 @@ class EventsCollection(Collection):
                 self._update_driver_stints(message)
             case "TimingData":
                 self._update_driver_personal_best_laps(message)
-                self._update_driver_positions(message)
+                self._update_driver_gaps(message)
             case _:
                 pass
             
