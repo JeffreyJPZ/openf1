@@ -28,8 +28,10 @@ def _hash_obj(obj: dict) -> str:
 def _get_elapsed_time(start: datetime, end: datetime) -> str:
     """
     Returns the elapsed time between start and end as a HH:MM:SS formatted string.
+    Assumes start and end are on the same day.
     """
-    return str(end - start)
+    # Pad an extra 0 in front for single digit hours.
+    return re.sub(r'^(\d):', r'0\1:', str(end - start))
 
 
 class EventCategory(str, Enum):
