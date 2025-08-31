@@ -25,6 +25,13 @@ def _hash_obj(obj: dict) -> str:
     return hashlib.sha3_512(json.dumps(obj=obj, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _get_elapsed_time(start: datetime, end: datetime) -> str:
+    """
+    Returns the elapsed time between start and end as a HH:MM:SS formatted string.
+    """
+    return str(end - start)
+
+
 class EventCategory(str, Enum):
     DRIVER_ACTION = "driver-action" # Actions by drivers - pit, out, overtakes, personal best laps, track limits violations, incidents
     DRIVER_NOTIFICATION = "driver-notification" # Other events involving drivers - blue flags, black flags, black and white flags, black and orange flags, incident verdicts, qualifying stage classifications, provisional classifications
@@ -168,6 +175,7 @@ class Event(Document):
     meeting_key: int
     session_key: int
     date: datetime
+    elapsed_time: str # HH:MM:SS formatted string for the time between the session stream start and the given event
     category: str
     cause: str
     details: EventDetails
@@ -205,6 +213,8 @@ class EventsCollection(Collection):
         gmt_offset="-05:00:00"
     )
 
+    session_stream_start: datetime = field(default=None)
+
     # Since messages are sorted by timepoint and then by topic we only need to keep the most recent data from other topics?
     session_start: datetime = field(default=None)
     session_offset: str = field(default=None) # GMT offset
@@ -237,6 +247,13 @@ class EventsCollection(Collection):
         
         self.lap_number = lap_number
 
+
+    def _update_session_stream_start(self, message: Message):
+        # Update session stream start if message indicates the session stream has started
+        cond = self._get_event_condition_map().get(EventCause.SESSION_START)
+        if cond is not None and cond(message):
+            self.session_stream_start = message.timepoint
+            
 
     def _update_session_info(self, message: Message):
         # Update session start and type
@@ -623,6 +640,7 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
+            elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
             category=EventCategory.DRIVER_ACTION.value,
             cause=EventCause.INCIDENT.value,
             details=details
@@ -656,6 +674,7 @@ class EventsCollection(Collection):
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
                 date=message.timepoint,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.OUT.value,
                 details=details
@@ -719,6 +738,7 @@ class EventsCollection(Collection):
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
                 date=message.timepoint,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.OVERTAKE.value,
                 details=details
@@ -771,6 +791,7 @@ class EventsCollection(Collection):
                     meeting_key=self.meeting_key,
                     session_key=self.session_key,
                     date=message.timepoint,
+                    elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
                     category=EventCategory.DRIVER_ACTION.value,
                     cause=EventCause.PERSONAL_BEST_LAP.value,
                     details=details
@@ -790,6 +811,7 @@ class EventsCollection(Collection):
                     meeting_key=self.meeting_key,
                     session_key=self.session_key,
                     date=message.timepoint,
+                    elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
                     category=EventCategory.DRIVER_ACTION.value,
                     cause=EventCause.PERSONAL_BEST_LAP.value,
                     details=details
@@ -836,10 +858,14 @@ class EventsCollection(Collection):
                 "pit_stop_duration": self.driver_pits.get(driver_number, {}).get("pit_stop_duration")
             }
 
+            # pit date, use message timestamp as fallback
+            date = self.driver_pits.get(driver_number, {}).get("date") if self.driver_pits.get(driver_number, {}).get("date") is not None else message.timepoint
+            
             yield Event(
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
-                date=self.driver_pits.get(driver_number, {}).get("date"),
+                date=date,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.PIT.value,
                 details=details
@@ -900,6 +926,7 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=track_limits_date,
+            elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=track_limits_date),
             category=EventCategory.DRIVER_ACTION.value,
             cause=EventCause.TRACK_LIMITS.value,
             details=details
@@ -987,6 +1014,7 @@ class EventsCollection(Collection):
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
                 date=message.timepoint,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
                 category=EventCategory.DRIVER_NOTIFICATION.value,
                 cause=EventCause.INCIDENT_VERDICT.value,
                 details=details
@@ -1012,6 +1040,7 @@ class EventsCollection(Collection):
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
                 date=message.timepoint,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
                 category=EventCategory.DRIVER_NOTIFICATION.value,
                 cause=EventCause.INCIDENT_VERDICT.value,
                 details=details
@@ -1034,6 +1063,7 @@ class EventsCollection(Collection):
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
                 date=message.timepoint,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
                 category=EventCategory.DRIVER_NOTIFICATION.value,
                 cause=EventCause.PROVISIONAL_CLASSIFICATION.value,
                 details=details
@@ -1083,6 +1113,7 @@ class EventsCollection(Collection):
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
                 date=message.timepoint,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
                 category=EventCategory.DRIVER_NOTIFICATION.value,
                 cause=EventCause.QUALIFYING_STAGE_CLASSIFICATION.value,
                 details=details
@@ -1127,6 +1158,7 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
+            elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
             category=EventCategory.DRIVER_NOTIFICATION.value,
             cause=event_cause.value,
             details=details
@@ -1165,6 +1197,7 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
+            elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
             category=EventCategory.SECTOR_NOTIFICATION.value,
             cause=event_cause.value,
             details=details
@@ -1197,6 +1230,7 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
+            elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
             category=EventCategory.TRACK_NOTIFICATION.value,
             cause=event_cause.value,
             details=details
@@ -1208,6 +1242,7 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=message.timepoint,
+            elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
             category=EventCategory.SESSION_NOTIFICATION.value,
             cause=event_cause.value,
             details=None
@@ -1243,6 +1278,7 @@ class EventsCollection(Collection):
             meeting_key=self.meeting_key,
             session_key=self.session_key,
             date=date,
+            elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
             category=EventCategory.OTHER.value,
             cause=EventCause.RACE_CONTROL_MESSAGE.value,
             details=details
@@ -1537,6 +1573,7 @@ class EventsCollection(Collection):
             case "Position.z":
                 self._update_driver_locations(message)
             case "SessionData":
+                self._update_session_stream_start(message)
                 if self.session_type == "Qualifying":
                     self._update_qualifying_stage_number(message)
             case "SessionInfo":
