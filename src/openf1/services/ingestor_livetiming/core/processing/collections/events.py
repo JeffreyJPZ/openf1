@@ -1319,17 +1319,21 @@ class EventsCollection(Collection):
             EventCause.OVERTAKE: lambda message: all(cond() for cond in [
                 lambda: message.topic == "DriverRaceInfo",
                 lambda: self.session_type == "Race",
+                # Overtakes after the session has finished are likely penalties and should not be counted
+                # but ignoring them affects the resulting sort order
                 lambda: deep_get(obj=message.content, key="OvertakeState") is not None,
                 lambda: deep_get(obj=message.content, key="Position") is not None
             ]),
             EventCause.PERSONAL_BEST_LAP: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData", 
-                lambda: self.session_type in ["Practice", "Qualifying"],
+                lambda: self.session_type in ("Practice", "Qualifying"),
                 lambda: deep_get(obj=message.content, key="SessionPart") is None
             ]),
             EventCause.PIT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingAppData",
                 lambda: self.session_type == "Race",
+                # Pit stops before the session has started should not be counted including pit stops on formation lap
+                # but ignoring them affects the resulting sort order
                 lambda: isinstance(deep_get(obj=message.content, key="Compound"), str)
             ]),
             EventCause.TRACK_LIMITS: lambda message: all(cond() for cond in [
@@ -1340,7 +1344,8 @@ class EventsCollection(Collection):
 
             EventCause.BLACK_FLAG: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
-                lambda: isinstance(deep_get(obj=message.content, key="Message"), str), # Check that message is a str to avoid TypeError when searching for substring
+                # Check that message is a str to avoid TypeError when searching for substring
+                lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "BLACK" in deep_get(obj=message.content, key="Message")
             ]), # Black flags do not have a "Flag" field
             EventCause.BLACK_AND_ORANGE_FLAG: lambda message: all(cond() for cond in [
@@ -1371,7 +1376,7 @@ class EventsCollection(Collection):
             EventCause.QUALIFYING_STAGE_CLASSIFICATION: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData", 
                 lambda: self.session_type == "Qualifying",
-                lambda: deep_get(obj=message.content, key="SessionPart") in [2, 3] # We only know the results of the previous stage after the next stage begins
+                lambda: deep_get(obj=message.content, key="SessionPart") in (2, 3) # We only know the results of the previous stage after the next stage begins
             ]),
 
             EventCause.GREEN_FLAG: lambda message: all(cond() for cond in [
