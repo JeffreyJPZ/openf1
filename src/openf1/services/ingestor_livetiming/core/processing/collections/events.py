@@ -100,6 +100,14 @@ class EventDetails(TypedDict):
     lap_number: int | None
         Describes lap numbers for events belonging to race sessions or the number of completed laps by a driver in practice/qualifying sessions.
 
+    event_lap_number: int | None
+        If present, this differs from lap_number in that it describes the actual lap number when the event occurred (not necessarily the lap number when the event was emitted),
+        such as the lap number when a driver pitted (since tyre information needed to generate pit events is usually delayed) or the lap number when an incident occurred (referred to by race control).
+        It might also be the number of completed laps by a driver in practice/qualifying sessions (for consistency when processing events).
+    
+    event_date: str | None
+        Similar to event_lap_number, it describes the actual date when the event occurred if present (not necessarily the date when the event was emitted),
+
     marker: str | dict[Literal['x', 'y', 'z'], int] | None
         Describes qualifying phases, turns and sectors for incident events, driver locations for overtake events.
         Examples:
@@ -157,6 +165,8 @@ class EventDetails(TypedDict):
     
     """
     lap_number: int | None
+    event_lap_number: int | None
+    event_date: str | None
     marker: str | dict[Literal["x", "y", "z"], int] | None
     driver_roles: dict[str, Literal["initiator", "participant"]] | None # Driver numbers must be kept as strings since they are part of a document
     position: int | None
@@ -579,12 +589,14 @@ class EventsCollection(Collection):
             date = to_datetime(deep_get(obj=message.content, key="Utc"))
             date = pytz.utc.localize(date)
         except:
-            date = None
+            # Use UTC date as fallback
+            date = message.timepoint
 
         try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
         except:
-            lap_number = None
+            # Use internal lap number as fallback
+            lap_number = self.lap_number
         
         # Extract incident information from race control message
         incident_pattern = (
@@ -601,6 +613,9 @@ class EventsCollection(Collection):
         )
         match = re.search(pattern=incident_pattern, string=race_control_message)
 
+        if match is None:
+            return
+        
         incident_marker = str(match.group("marker")) if match.group("marker") is not None else None
         incident_reason = str(match.group("reason")) if match.group("reason") is not None else None
         incident_lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
@@ -631,7 +646,8 @@ class EventsCollection(Collection):
             driver_roles = {f"{driver_number}": "initiator" for driver_number in incident_driver_numbers}
 
         details: EventDetails = {
-            "lap_number": incident_lap_number if incident_lap_number is not None else lap_number,
+            "lap_number": lap_number,
+            "event_lap_number": incident_lap_number,
             "marker": incident_marker,
             "driver_roles": driver_roles,
             "reason": incident_reason,
@@ -745,7 +761,7 @@ class EventsCollection(Collection):
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
                 date=date, 
-                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.OVERTAKE.value,
                 details=details
@@ -808,7 +824,6 @@ class EventsCollection(Collection):
                 # but no change in position
                 details: EventDetails = {
                     "driver_roles": {f"{driver_number}": "initiator"},
-                    "position": None,
                     "lap_duration": best_lap_time,
                     "compound": self.driver_stints.get(driver_number, {}).get("compound"),
                     "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start")
@@ -857,7 +872,9 @@ class EventsCollection(Collection):
                 continue
 
             details: EventDetails = {
-                "lap_number": self.driver_pits.get(driver_number, {}).get("lap_number"),
+                "lap_number": self.lap_number,
+                "event_lap_number": self.driver_pits.get(driver_number, {}).get("lap_number"),
+                "event_date": self.driver_pits.get(driver_number, {}).get("date").isoformat() if self.driver_pits.get(driver_number, {}).get("date") is not None else None,
                 "driver_roles": {f"{driver_number}": "initiator"},
                 "compound": self.driver_stints.get(driver_number, {}).get("compound"),
                 "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
@@ -865,14 +882,11 @@ class EventsCollection(Collection):
                 "pit_stop_duration": self.driver_pits.get(driver_number, {}).get("pit_stop_duration")
             }
 
-            # pit date, use message timestamp as fallback
-            date = self.driver_pits.get(driver_number, {}).get("date") if self.driver_pits.get(driver_number, {}).get("date") is not None else message.timepoint
-            
             yield Event(
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
-                date=date,
-                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
+                date=message.timepoint,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.PIT.value,
                 details=details
@@ -889,12 +903,12 @@ class EventsCollection(Collection):
             date = to_datetime(deep_get(obj=message.content, key="Utc"))
             date = pytz.utc.localize(date)
         except:
-            date = None
+            date = message.timepoint
 
         try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
         except:
-            lap_number = None
+            lap_number = self.lap_number
         
         # Extract track limits violation information from race control message
         track_limits_pattern = (
@@ -923,7 +937,9 @@ class EventsCollection(Collection):
             track_limits_date = None
 
         details: EventDetails = {
-            "lap_number": track_limits_lap_number if track_limits_lap_number is not None else lap_number, # Lap number for qualifying incidents is individual to driver
+            "lap_number": lap_number,
+            "event_lap_number": track_limits_lap_number,
+            "event_date": track_limits_date.isoformat(),
             "marker": track_limits_marker,
             "driver_roles": {f"{track_limits_driver_number}": "initiator"} if track_limits_driver_number is not None else None,
             "message": race_control_message
@@ -932,8 +948,8 @@ class EventsCollection(Collection):
         yield Event(
             meeting_key=self.meeting_key,
             session_key=self.session_key,
-            date=track_limits_date,
-            elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=track_limits_date),
+            date=date,
+            elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
             category=EventCategory.DRIVER_ACTION.value,
             cause=EventCause.TRACK_LIMITS.value,
             details=details
@@ -947,9 +963,15 @@ class EventsCollection(Collection):
             return
         
         try:
+            date = to_datetime(deep_get(obj=message.content, key="Utc"))
+            date = pytz.utc.localize(date)
+        except:
+            date = message.timepoint
+
+        try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
         except:
-            lap_number = None
+            lap_number = self.lap_number
         
         # Extract incident verdict information from race control message
         # We need two patterns as penalty verdicts differ from others in structure
@@ -976,18 +998,19 @@ class EventsCollection(Collection):
             r"$"
         )
 
-        match = re.search(pattern=incident_verdict_pattern, string=race_control_message)
+        incident_verdict_match = re.search(pattern=incident_verdict_pattern, string=race_control_message)
+        penalty_verdict_match = re.search(pattern=penalty_verdict_pattern, string=race_control_message)
 
-        if match is not None:
+        if incident_verdict_match is not None:
             # Standard incident verdict message
-            incident_verdict_marker = str(match.group("marker")) if match.group("marker") is not None else None
-            incident_verdict = str(match.group("verdict")) if match.group("verdict") is not None else None
-            incident_verdict_reason = str(match.group("reason")) if match.group("reason") is not None else None
-            incident_verdict_lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
+            incident_verdict_marker = str(incident_verdict_match.group("marker")) if incident_verdict_match.group("marker") is not None else None
+            penalty_verdict = str(incident_verdict_match.group("verdict")) if incident_verdict_match.group("verdict") is not None else None
+            penalty_verdict_reason = str(incident_verdict_match.group("reason")) if incident_verdict_match.group("reason") is not None else None
+            incident_verdict_lap_number = int(incident_verdict_match.group("lap_number")) if incident_verdict_match.group("lap_number") is not None else None
             
             try:
                 incident_verdict_driver_numbers = [
-                    int(driver_number) for driver_number in re.findall(r"(\d+)", str(match.group("driver_numbers")))
+                    int(driver_number) for driver_number in re.findall(r"(\d+)", str(incident_verdict_match.group("driver_numbers")))
                 ]
             except:
                 incident_verdict_driver_numbers = []
@@ -1009,45 +1032,43 @@ class EventsCollection(Collection):
                 driver_roles = {f"{driver_number}": "initiator" for driver_number in incident_verdict_driver_numbers}
 
             details: EventDetails = {
-                "lap_number": incident_verdict_lap_number if incident_verdict_lap_number is not None else lap_number,
+                "lap_number": lap_number,
+                "event_lap_number": incident_verdict_lap_number,
                 "marker": incident_verdict_marker,
                 "driver_roles": driver_roles,
-                "verdict": incident_verdict,
-                "reason": incident_verdict_reason,
+                "verdict": penalty_verdict,
+                "reason": penalty_verdict_reason,
                 "message": race_control_message
             }
 
             yield Event(
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
-                date=message.timepoint,
-                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
+                date=date,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
                 category=EventCategory.DRIVER_NOTIFICATION.value,
                 cause=EventCause.INCIDENT_VERDICT.value,
                 details=details
             )
-        else:
-            # Penalty verdict message
-            match = re.search(pattern=penalty_verdict_pattern, string=race_control_message)
-
-            incident_verdict = str(match.group("verdict")) if match.group("verdict") is not None else None
-            incident_verdict_reason = str(match.group("reason")) if match.group("reason") is not None else None
-            incident_verdict_driver_number = int(match.group("driver_number")) if match.group("driver_number") is not None else None
+            
+        elif penalty_verdict_match is not None:
+            penalty_verdict = str(penalty_verdict_match.group("verdict")) if penalty_verdict_match.group("verdict") is not None else None
+            penalty_verdict_reason = str(penalty_verdict_match.group("reason")) if penalty_verdict_match.group("reason") is not None else None
+            penalty_verdict_driver_number = int(penalty_verdict_match.group("driver_number")) if penalty_verdict_match.group("driver_number") is not None else None
             
             details: EventDetails = {
-                "lap_number": None,
-                "marker": None,
-                "driver_roles": {f"{incident_verdict_driver_number}": "initiator"} if incident_verdict_driver_number is not None else None,
-                "verdict": incident_verdict,
-                "reason": incident_verdict_reason,
+                "lap_number": lap_number,
+                "driver_roles": {f"{penalty_verdict_driver_number}": "initiator"} if penalty_verdict_driver_number is not None else None,
+                "verdict": penalty_verdict,
+                "reason": penalty_verdict_reason,
                 "message": race_control_message
             }
 
             yield Event(
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
-                date=message.timepoint,
-                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
+                date=date,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
                 category=EventCategory.DRIVER_NOTIFICATION.value,
                 cause=EventCause.INCIDENT_VERDICT.value,
                 details=details
@@ -1091,7 +1112,7 @@ class EventsCollection(Collection):
         except:
             return
         
-        if current_qualifying_stage_number not in [2, 3]:
+        if current_qualifying_stage_number not in (2, 3):
             return
         
         driver_status_data = deep_get(obj=message.content, key="Lines")
@@ -1117,7 +1138,8 @@ class EventsCollection(Collection):
                 "lap_duration": self.driver_personal_best_laps.get(driver_number),
                 "compound": self.driver_stints.get(driver_number, {}).get("compound"),
                 "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
-                "qualifying_stage_number": current_qualifying_stage_number - 1, 
+                # Advanced/eliminated from the previous stage
+                "qualifying_stage_number": current_qualifying_stage_number - 1,
                 "eliminated": eliminated
             }
 
@@ -1146,12 +1168,12 @@ class EventsCollection(Collection):
             date = to_datetime(deep_get(obj=message.content, key="Utc"))
             date = pytz.utc.localize(date)
         except:
-            date = None
+            date = message.timepoint
 
         try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
         except:
-            lap_number = None
+            lap_number = self.lap_number
 
         try:
             driver_number = int(deep_get(obj=message.content, key="RacingNumber"))
@@ -1191,12 +1213,12 @@ class EventsCollection(Collection):
             date = to_datetime(deep_get(obj=message.content, key="Utc"))
             date = pytz.utc.localize(date)
         except:
-            date = None
+            date = message.timepoint
 
         try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
         except:
-            lap_number = None
+            lap_number = self.lap_number
         
         # Extract sector from race control message
         sector_pattern = r"(?P<marker>SECTOR\s+\d+)"
@@ -1230,12 +1252,12 @@ class EventsCollection(Collection):
             date = to_datetime(deep_get(obj=message.content, key="Utc"))
             date = pytz.utc.localize(date)
         except:
-            date = None
+            date = message.timepoint
 
         try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
         except:
-            lap_number = None
+            lap_number = self.lap_number
         
         details: EventDetails = {
             "lap_number": lap_number,
@@ -1278,12 +1300,12 @@ class EventsCollection(Collection):
             date = to_datetime(deep_get(obj=message.content, key="Utc"))
             date = pytz.utc.localize(date)
         except:
-            date = None
+            date = message.timepoint
 
         try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
         except:
-            lap_number = None
+            lap_number = self.lap_number
 
         details: EventDetails = {
             "lap_number": lap_number,
@@ -1320,7 +1342,7 @@ class EventsCollection(Collection):
                 lambda: message.topic == "DriverRaceInfo",
                 lambda: self.session_type == "Race",
                 # Overtakes after the session has finished are likely penalties and should not be counted
-                # but ignoring them affects the resulting sort order
+                # but ignoring them affects the resulting sort order - might be caused by internal state updates resulting in a "lesser" hash
                 lambda: deep_get(obj=message.content, key="OvertakeState") is not None,
                 lambda: deep_get(obj=message.content, key="Position") is not None
             ]),
@@ -1333,7 +1355,7 @@ class EventsCollection(Collection):
                 lambda: message.topic == "TimingAppData",
                 lambda: self.session_type == "Race",
                 # Pit stops before the session has started should not be counted including pit stops on formation lap
-                # but ignoring them affects the resulting sort order
+                # but ignoring them affects the resulting sort order - also might be caused by internal state updates
                 lambda: isinstance(deep_get(obj=message.content, key="Compound"), str)
             ]),
             EventCause.TRACK_LIMITS: lambda message: all(cond() for cond in [
@@ -1366,7 +1388,8 @@ class EventsCollection(Collection):
                 lambda: message.topic == "RaceControlMessages",
                 lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "FIA STEWARDS" in deep_get(obj=message.content, key="Message"),
-                lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message") # "UNDER INVESTIGATION" is not a verdict
+                # "UNDER INVESTIGATION" is not a verdict
+                lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message")
             ]),
             EventCause.PROVISIONAL_CLASSIFICATION: lambda message: all(cond() for cond in [
                 lambda: message.topic == "SessionData",
@@ -1376,7 +1399,8 @@ class EventsCollection(Collection):
             EventCause.QUALIFYING_STAGE_CLASSIFICATION: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingData", 
                 lambda: self.session_type == "Qualifying",
-                lambda: deep_get(obj=message.content, key="SessionPart") in (2, 3) # We only know the results of the previous stage after the next stage begins
+                # We only know the results of the previous stage after the next stage begins
+                lambda: deep_get(obj=message.content, key="SessionPart") in (2, 3)
             ]),
 
             EventCause.GREEN_FLAG: lambda message: all(cond() for cond in [
@@ -1434,7 +1458,8 @@ class EventsCollection(Collection):
             EventCause.SESSION_START: lambda message: all(cond() for cond in [
                 lambda: message.topic == "SessionData",
                 lambda: self.session_status is None,
-                lambda: isinstance(deep_get(obj=message.content, key="Series"), list), # First session status message always has empty series list
+                # First session status message always has empty series list
+                lambda: isinstance(deep_get(obj=message.content, key="Series"), list),
                 lambda: len(deep_get(obj=message.content, key="Series")) == 0
             ]),
             EventCause.SESSION_END: lambda message: all(cond() for cond in [
