@@ -4,7 +4,7 @@ import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Callable, ClassVar, Iterator, Literal, TypedDict
 
@@ -736,10 +736,15 @@ class EventsCollection(Collection):
                 "position": overtake_position
             }
 
+            # Adjust date so that multiple overtakes do not have the exact same date
+            # (overtakes for lower positions are before overtakes for higher positions when sorting chronologically by date)
+            # Since F1 only has millisecond precision timing this is inconsequential
+            date = message.timepoint - timedelta(microseconds=overtake_position)
+            
             yield Event(
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
-                date=message.timepoint,
+                date=date, 
                 elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.OVERTAKE.value,
@@ -1061,11 +1066,15 @@ class EventsCollection(Collection):
                 "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start") if self.session_type in ("Practice", "Qualifying") else None
             }
 
+            # Adjust date so that higher positions are before lower positions when sorting chronologically by date
+            # Since F1 only has millisecond precision timing this is inconsequential
+            date = message.timepoint + timedelta(microseconds=position)
+
             yield Event(
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
-                date=message.timepoint,
-                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
+                date=date,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
                 category=EventCategory.DRIVER_NOTIFICATION.value,
                 cause=EventCause.PROVISIONAL_CLASSIFICATION.value,
                 details=details
@@ -1100,10 +1109,11 @@ class EventsCollection(Collection):
                 continue
 
             eliminated = bool(data.get("KnockedOut")) or False
-            
+            position = self.driver_positions.get(driver_number)
+
             details: EventDetails = {
                 "driver_roles": {f"{driver_number}": "initiator"},
-                "position": self.driver_positions.get(driver_number),
+                "position": position,
                 "lap_duration": self.driver_personal_best_laps.get(driver_number),
                 "compound": self.driver_stints.get(driver_number, {}).get("compound"),
                 "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
@@ -1111,11 +1121,15 @@ class EventsCollection(Collection):
                 "eliminated": eliminated
             }
 
+            # Adjust date so that higher positions are before lower positions when sorting chronologically by date
+            # Since F1 only has millisecond precision timing this is inconsequential
+            date = message.timepoint + timedelta(microseconds=position)
+
             yield Event(
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
-                date=message.timepoint,
-                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
+                date=date,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
                 category=EventCategory.DRIVER_NOTIFICATION.value,
                 cause=EventCause.QUALIFYING_STAGE_CLASSIFICATION.value,
                 details=details
