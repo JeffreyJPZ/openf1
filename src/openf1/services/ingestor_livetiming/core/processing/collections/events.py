@@ -1388,8 +1388,9 @@ class EventsCollection(Collection):
                 lambda: message.topic == "RaceControlMessages",
                 lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "FIA STEWARDS" in deep_get(obj=message.content, key="Message"),
-                # "UNDER INVESTIGATION" is not a verdict
-                lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message")
+                # Handle edge cases
+                lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message"),
+                lambda: "PENALTY SERVED" not in deep_get(obj=message.content, key="Message")
             ]),
             EventCause.PROVISIONAL_CLASSIFICATION: lambda message: all(cond() for cond in [
                 lambda: message.topic == "SessionData",
