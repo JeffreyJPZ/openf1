@@ -1,7 +1,5 @@
 FROM python:3.10-slim
 
-LABEL org.opencontainers.image.source=https://github.com/JeffreyJPZ/openf1
-
 ENV PYTHONUNBUFFERED True
 
 ENV APP_HOME /app
