@@ -7,7 +7,7 @@ from loguru import logger
 from openf1.services.ingestor_livetiming.core.decoding import decode
 from openf1.services.ingestor_livetiming.core.objects import Document, Message
 from openf1.services.ingestor_livetiming.core.processing.main import process_message
-from openf1.util.db import insert_data_async
+from openf1.util.db import upsert_data_async
 from openf1.util.misc import json_serializer, to_datetime
 from openf1.util.mqtt import initialize_mqtt
 
@@ -84,7 +84,7 @@ async def ingest_line(line: str):
                 logger.warning("Publishing to MQTT timed out. Skipping messages.")
         try:
             await asyncio.wait_for(
-                insert_data_async(collection_name=collection, docs=docs_mongo),
+                upsert_data_async(collection_name=collection, docs=docs_mongo),
                 timeout=NETWORK_TIMEOUT,
             )
         except asyncio.TimeoutError:

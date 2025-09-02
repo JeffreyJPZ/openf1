@@ -277,19 +277,32 @@ def insert_data_sync(collection_name: str, docs: list[dict], batch_size: int = 5
 
 
 def upsert_data_sync(collection_name: str, docs: list[dict], batch_size: int = 50_000):
-    """Upserts (inserts or replaces) documents into a MongoDB collection in batches
-    based on _key."""
+    """
+    Upserts (inserts or replaces) documents into a MongoDB collection in batches
+    based on _key.
+    """
     collection = _get_mongo_db_sync()[collection_name]
 
     for i in range(0, len(docs), batch_size):
         batch = docs[i : i + batch_size]
-        operations = [
-            ReplaceOne({"_key": doc["_key"]}, doc, upsert=True) for doc in batch
-        ]
-        collection.bulk_write(operations, ordered=False)
+
+        try:
+            operations = [
+                ReplaceOne({"_key": doc["_key"]}, doc, upsert=True) for doc in batch
+            ]
+            collection.bulk_write(operations, ordered=False)
+        except BulkWriteError as bwe:
+            for error in bwe.details.get("writeErrors", []):
+                logger.error(f"Error during bulk write operation: {error}")
+        except Exception:
+            logger.exception("Error during bulk write operation")
 
 
 async def insert_data_async(collection_name: str, docs: list[dict]):
+    """
+    Inserts documents into a MongoDB collection asynchronously.
+    Documents will continue to be inserted even if an error occurs during write.
+    """
     collection = _get_mongo_db_async()[collection_name]
 
     try:
@@ -300,3 +313,23 @@ async def insert_data_async(collection_name: str, docs: list[dict]):
             logger.error(f"Error during bulk write operation: {error}")
     except Exception:
         logger.exception("Error during bulk write operation")
+
+
+async def upsert_data_async(collection_name: str, docs: list[dict]):
+    """
+    Upserts (inserts or replaces) documents into a MongoDB collection asynchronously
+    based on _key. Documents will continue to be inserted even if an error occurs during write
+    """
+    collection = _get_mongo_db_async()[collection_name]
+
+    try:
+        operations = [
+            ReplaceOne({"_key": doc["_key"]}, doc, upsert=True) for doc in docs
+        ]
+        await collection.bulk_write(operations, ordered=False)
+    except BulkWriteError as bwe:
+        for error in bwe.details.get("writeErrors", []):
+            logger.error(f"Error during bulk write operation: {error}")
+    except Exception:
+        logger.exception("Error during bulk write operation")
+        
