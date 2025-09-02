@@ -25,11 +25,15 @@ def _hash_obj(obj: dict) -> str:
     return hashlib.sha3_512(json.dumps(obj=obj, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _get_elapsed_time(start: datetime, end: datetime) -> str:
+def _get_elapsed_time(start: datetime, end: datetime) -> str | None:
     """
-    Returns the elapsed time between start and end as a HH:MM:SS formatted string.
+    Returns the elapsed time between start and end as a HH:MM:SS formatted string,
+    otherwise None.
     Assumes start and end are on the same day.
     """
+    if not isinstance(start, datetime) or not isinstance(end, datetime):
+        return None
+    
     # Pad an extra 0 in front for single digit hours.
     return re.sub(r'^(\d):', r'0\1:', str(end - start))
 
@@ -100,14 +104,6 @@ class EventDetails(TypedDict):
     lap_number: int | None
         Describes lap numbers for events belonging to race sessions or the number of completed laps by a driver in practice/qualifying sessions.
 
-    event_lap_number: int | None
-        If present, this differs from lap_number in that it describes the actual lap number when the event occurred (not necessarily the lap number when the event was emitted),
-        such as the lap number when a driver pitted (since tyre information needed to generate pit events is usually delayed) or the lap number when an incident occurred (referred to by race control).
-        It might also be the number of completed laps by a driver in practice/qualifying sessions (for consistency when processing events).
-    
-    event_date: str | None
-        Similar to event_lap_number, it describes the actual date when the event occurred if present (not necessarily the date when the event was emitted),
-
     marker: str | dict[Literal['x', 'y', 'z'], int] | None
         Describes qualifying phases, turns and sectors for incident events, driver locations for overtake events.
         Examples:
@@ -165,8 +161,6 @@ class EventDetails(TypedDict):
     
     """
     lap_number: int | None
-    event_lap_number: int | None
-    event_date: str | None
     marker: str | dict[Literal["x", "y", "z"], int] | None
     driver_roles: dict[str, Literal["initiator", "participant"]] | None # Driver numbers must be kept as strings since they are part of a document
     position: int | None
@@ -645,9 +639,11 @@ class EventsCollection(Collection):
             # Incident is not between drivers
             driver_roles = {f"{driver_number}": "initiator" for driver_number in incident_driver_numbers}
 
+        # Prioritize lap number in message
+        lap_number = incident_lap_number if incident_lap_number is not None else lap_number
+
         details: EventDetails = {
             "lap_number": lap_number,
-            "event_lap_number": incident_lap_number,
             "marker": incident_marker,
             "driver_roles": driver_roles,
             "reason": incident_reason,
@@ -870,11 +866,13 @@ class EventsCollection(Collection):
         
             if not "Compound" in latest_stint_data or latest_stint_data.get("Compound") == "UNKNOWN" or latest_stint_data.get("TyresNotChanged") != "0":
                 continue
+            
+            # Prioritize date from pit information
+            date = self.driver_pits.get(driver_number, {}).get("date") if self.driver_pits.get(driver_number, {}).get("date") is not None else message.timepoint
+            lap_number = self.driver_pits.get(driver_number, {}).get("lap_number") if self.driver_pits.get(driver_number, {}).get("lap_number") is not None else self.lap_number
 
             details: EventDetails = {
-                "lap_number": self.lap_number,
-                "event_lap_number": self.driver_pits.get(driver_number, {}).get("lap_number"),
-                "event_date": self.driver_pits.get(driver_number, {}).get("date").isoformat() if self.driver_pits.get(driver_number, {}).get("date") is not None else None,
+                "lap_number": lap_number,
                 "driver_roles": {f"{driver_number}": "initiator"},
                 "compound": self.driver_stints.get(driver_number, {}).get("compound"),
                 "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
@@ -885,8 +883,8 @@ class EventsCollection(Collection):
             yield Event(
                 meeting_key=self.meeting_key,
                 session_key=self.session_key,
-                date=message.timepoint,
-                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
+                date=date,
+                elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=date),
                 category=EventCategory.DRIVER_ACTION.value,
                 cause=EventCause.PIT.value,
                 details=details
@@ -936,10 +934,12 @@ class EventsCollection(Collection):
         except:
             track_limits_date = None
 
+        # Prioritize information in message
+        date = track_limits_date if track_limits_date is not None else date
+        lap_number = track_limits_lap_number if track_limits_lap_number is not None else lap_number
+        
         details: EventDetails = {
             "lap_number": lap_number,
-            "event_lap_number": track_limits_lap_number,
-            "event_date": track_limits_date.isoformat(),
             "marker": track_limits_marker,
             "driver_roles": {f"{track_limits_driver_number}": "initiator"} if track_limits_driver_number is not None else None,
             "message": race_control_message
@@ -968,6 +968,7 @@ class EventsCollection(Collection):
         except:
             date = message.timepoint
 
+        # Lap number should be the current lap number since verdict is separate from incident
         try:
             lap_number = int(deep_get(obj=message.content, key="Lap"))
         except:
@@ -979,7 +980,6 @@ class EventsCollection(Collection):
             r"^"
             r"(?:FIA\s+STEWARDS:\s+)?"
             r"(?:(?P<marker>[A-Z0-9/\s]+?)\s+)?"                                                        # Captures marker if it exists
-            r"(?:LAP\s+(?P<lap_number>\d+)\s+)?"                                                        # Captures lap number if it exists
             r"INCIDENT"
             r"(?:\s+INVOLVING\s+CARS?\s+(?P<driver_numbers>(?:\d+\s+\(\w+\)(?:\s*,\s*|\s+AND\s+)?)+))?" # Captures driver numbers if they exist
             r"\s+"
@@ -1004,9 +1004,8 @@ class EventsCollection(Collection):
         if incident_verdict_match is not None:
             # Standard incident verdict message
             incident_verdict_marker = str(incident_verdict_match.group("marker")) if incident_verdict_match.group("marker") is not None else None
-            penalty_verdict = str(incident_verdict_match.group("verdict")) if incident_verdict_match.group("verdict") is not None else None
-            penalty_verdict_reason = str(incident_verdict_match.group("reason")) if incident_verdict_match.group("reason") is not None else None
-            incident_verdict_lap_number = int(incident_verdict_match.group("lap_number")) if incident_verdict_match.group("lap_number") is not None else None
+            incident_verdict = str(incident_verdict_match.group("verdict")) if incident_verdict_match.group("verdict") is not None else None
+            incident_verdict_reason = str(incident_verdict_match.group("reason")) if incident_verdict_match.group("reason") is not None else None
             
             try:
                 incident_verdict_driver_numbers = [
@@ -1033,11 +1032,10 @@ class EventsCollection(Collection):
 
             details: EventDetails = {
                 "lap_number": lap_number,
-                "event_lap_number": incident_verdict_lap_number,
                 "marker": incident_verdict_marker,
                 "driver_roles": driver_roles,
-                "verdict": penalty_verdict,
-                "reason": penalty_verdict_reason,
+                "verdict": incident_verdict,
+                "reason": incident_verdict_reason,
                 "message": race_control_message
             }
 
@@ -1286,7 +1284,7 @@ class EventsCollection(Collection):
             details=None
         )
 
-        # Update session status with new session status
+        # Update session status with new session status for subsequent events
         self._update_session_status(message)
 
 
@@ -1343,6 +1341,7 @@ class EventsCollection(Collection):
                 lambda: self.session_type == "Race",
                 # Overtakes after the session has finished are likely penalties and should not be counted
                 # but ignoring them affects the resulting sort order - might be caused by internal state updates resulting in a "lesser" hash
+                lambda: self.session_status in ("Aborted", "Started"),
                 lambda: deep_get(obj=message.content, key="OvertakeState") is not None,
                 lambda: deep_get(obj=message.content, key="Position") is not None
             ]),
@@ -1356,6 +1355,7 @@ class EventsCollection(Collection):
                 lambda: self.session_type == "Race",
                 # Pit stops before the session has started should not be counted including pit stops on formation lap
                 # but ignoring them affects the resulting sort order - also might be caused by internal state updates
+                lambda: self.session_status in ("Aborted", "Started"),
                 lambda: isinstance(deep_get(obj=message.content, key="Compound"), str)
             ]),
             EventCause.TRACK_LIMITS: lambda message: all(cond() for cond in [
@@ -1544,6 +1544,7 @@ class EventsCollection(Collection):
                 lambda: deep_get(obj=message.content, key="SessionStatus") == "Finished"
             ]),
 
+            # Must be last since other events satisfy this condition
             EventCause.RACE_CONTROL_MESSAGE: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
                 lambda: isinstance(deep_get(obj=message.content, key="Message"), str)
