@@ -10,5 +10,3 @@ RUN apt-get update && apt-get install -y build-essential git
 COPY . ./
 
 RUN pip install --no-cache-dir -e .
-
-CMD ["tail", "-f", "/dev/null"]
