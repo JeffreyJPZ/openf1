@@ -352,9 +352,16 @@ def ingest_collections(
 
 
 @cli.command()
-def ingest_session(year: int, meeting_key: int, session_key: int, verbose: bool = True):
-    collections = get_collections(meeting_key=meeting_key, session_key=session_key)
-    collection_names = sorted([c.__class__.name for c in collections])
+def ingest_session(
+    year: int,
+    meeting_key: int,
+    session_key: int,
+    collection_names: list[str],
+    verbose: bool = True
+):  
+    if len(collection_names) == 0:
+        collections = get_collections(meeting_key=meeting_key, session_key=session_key)
+        collection_names = sorted([c.__class__.name for c in collections])
 
     if verbose:
         logger.info(
@@ -371,7 +378,12 @@ def ingest_session(year: int, meeting_key: int, session_key: int, verbose: bool 
 
 
 @cli.command()
-def ingest_meeting(year: int, meeting_key: int, verbose: bool = True):
+def ingest_meeting(
+    year: int,
+    meeting_key: int,
+    collection_names: list[str],
+    verbose: bool = True
+):
     session_keys = get_session_keys(year=year, meeting_key=meeting_key)
     if verbose:
         logger.info(f"{len(session_keys)} sessions found: {session_keys}")
@@ -379,21 +391,33 @@ def ingest_meeting(year: int, meeting_key: int, verbose: bool = True):
     for session_key in session_keys:
         if verbose:
             logger.info(f"Ingesting session {session_key}")
+
         ingest_session(
-            year=year, meeting_key=meeting_key, session_key=session_key, verbose=False
+            year=year,
+            meeting_key=meeting_key,
+            session_key=session_key,
+            collection_names=collection_names,
+            verbose=False
         )
 
 
 @cli.command()
-def ingest_season(year: int, verbose: bool = True):
+def ingest_season(year: int, collection_names: list[str], verbose: bool = True):
     meeting_keys = get_meeting_keys(year)
+
     if verbose:
         logger.info(f"{len(meeting_keys)} meetings found: {meeting_keys}")
 
     for meeting_key in meeting_keys:
         if verbose:
             logger.info(f"Ingesting meeting {meeting_key}")
-        ingest_meeting(year=year, meeting_key=meeting_key, verbose=False)
+
+        ingest_meeting(
+            year=year,
+            meeting_key=meeting_key,
+            collection_names=collection_names,
+            verbose=False
+        )
 
 
 if __name__ == "__main__":
