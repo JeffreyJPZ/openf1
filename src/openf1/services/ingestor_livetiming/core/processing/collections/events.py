@@ -918,7 +918,10 @@ class EventsCollection(Collection):
             r"$"
         )
         match = re.search(pattern=track_limits_pattern, string=race_control_message)
-
+        
+        if match is None:
+            return
+        
         track_limits_driver_number = int(match.group("driver_number")) if match.group("driver_number") is not None else None
         track_limits_marker = str(match.group("marker")) if match.group("marker") is not None else None
         track_limits_lap_number = int(match.group("lap_number")) if match.group("lap_number") is not None else None
