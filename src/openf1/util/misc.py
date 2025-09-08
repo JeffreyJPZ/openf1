@@ -201,7 +201,7 @@ def add_timezone_info(dt: datetime, gmt_offset: str) -> datetime:
     return dt.replace(tzinfo=offset_tz).astimezone(tzutc())
 
 
-def hash_obj(obj):
+def hash_obj(obj: Any):
     """Recursively hashes an object."""
     if isinstance(obj, dict):
         return tuple(sorted((k, hash_obj(v)) for k, v in obj.items()))
@@ -212,3 +212,8 @@ def hash_obj(obj):
     else:
         # Assume obj is hashable
         return obj
+    
+
+def dict_without_keys(obj: dict, keys: list[str]) -> dict:
+    """Returns a new dict without the given keys."""
+    return {key: value for key, value in obj.items() if key not in keys}

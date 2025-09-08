@@ -363,16 +363,32 @@ def ingest_session(
         collections = get_collections(meeting_key=meeting_key, session_key=session_key)
         collection_names = sorted([c.__class__.name for c in collections])
 
+    # Filter out meetings since there is no way to determine if this is the first session of a meeting
+    collection_names = [collection for collection in collection_names if collection != "meeting"]
+
     if verbose:
         logger.info(
             f"Ingesting {len(collection_names)} collections: {collection_names}"
+        )
+    
+    # Ingest session once to avoid id conflicts
+    if "sessions" in collection_names:
+        ingest_collections(
+            year=year,
+            meeting_key=meeting_key,
+            session_key=session_key,
+            collection_names=["sessions"],
+            verbose=verbose
         )
 
     ingest_collections(
         year=year,
         meeting_key=meeting_key,
         session_key=session_key,
-        collection_names=collection_names,
+        collection_names=[
+            # Filter out sessions
+            collection for collection in collection_names if collection != "sessions"
+        ],
         verbose=verbose,
     )
 
@@ -388,6 +404,18 @@ def ingest_meeting(
     if verbose:
         logger.info(f"{len(session_keys)} sessions found: {session_keys}")
 
+    # Assume that session keys are in increasing order within the same meeting,
+    # therefore the first session has the smallest key (the meeting start)
+    # Ingest meeting once otherwise each session will produce a new document with different meeting starts
+    if "meetings" in collection_names:
+        ingest_collections(
+            year=year,
+            meeting_key=meeting_key,
+            session_key=min(session_keys),
+            collection_names=["meetings"],
+            verbose=verbose
+        )
+
     for session_key in session_keys:
         if verbose:
             logger.info(f"Ingesting session {session_key}")
@@ -396,7 +424,10 @@ def ingest_meeting(
             year=year,
             meeting_key=meeting_key,
             session_key=session_key,
-            collection_names=collection_names,
+            collection_names=[
+                # Filter out meetings
+                collection for collection in collection_names if collection != "meetings"
+            ],
             verbose=False
         )
 

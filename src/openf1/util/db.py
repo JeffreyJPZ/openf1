@@ -7,10 +7,10 @@ from typing import Any
 
 from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import InsertOne, MongoClient, ReplaceOne
+from pymongo import InsertOne, MongoClient, UpdateOne
 from pymongo.errors import BulkWriteError
 
-from openf1.util.misc import hash_obj, timed_cache
+from openf1.util.misc import dict_without_keys, hash_obj, timed_cache
 
 _MONGO_CONNECTION_STRING = os.getenv("MONGO_CONNECTION_STRING")
 _MONGO_DATABASE = os.getenv("OPENF1_DB_NAME", "openf1-livetiming")
@@ -287,8 +287,13 @@ def upsert_data_sync(collection_name: str, docs: list[dict], batch_size: int = 5
         batch = docs[i : i + batch_size]
 
         try:
+            # Use UpdateOne so that updating documents with new fields won't result in id conflicts
             operations = [
-                ReplaceOne({"_key": doc["_key"]}, doc, upsert=True) for doc in batch
+                UpdateOne(
+                    {"_key": doc["_key"]},
+                    {"$set": dict_without_keys(obj=doc, keys=["_id"])}, # Remove _id field since it is immutable
+                    upsert=True
+                ) for doc in batch
             ]
             collection.bulk_write(operations, ordered=False)
         except BulkWriteError as bwe:
@@ -318,13 +323,17 @@ async def insert_data_async(collection_name: str, docs: list[dict]):
 async def upsert_data_async(collection_name: str, docs: list[dict]):
     """
     Upserts (inserts or replaces) documents into a MongoDB collection asynchronously
-    based on _key. Documents will continue to be inserted even if an error occurs during write
+    based on _key. Documents will continue to be inserted even if an error occurs during write.
     """
     collection = _get_mongo_db_async()[collection_name]
 
     try:
         operations = [
-            ReplaceOne({"_key": doc["_key"]}, doc, upsert=True) for doc in docs
+            UpdateOne(
+                {"_key": doc["_key"]},
+                {"$set": dict_without_keys(obj=doc, keys=["_id"])},
+                upsert=True
+            ) for doc in docs
         ]
         await collection.bulk_write(operations, ordered=False)
     except BulkWriteError as bwe:
