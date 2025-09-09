@@ -30,15 +30,16 @@ def _get_elapsed_time(start: datetime, end: datetime) -> str | None:
     Returns the elapsed time between start and end as a HH:MM:SS formatted string,
     otherwise None.
     Assumes start and end are on the same day.
+    If end < start, returns the formatting string with a '-' symbol prefixed.
     """
     if not isinstance(start, datetime) or not isinstance(end, datetime):
         return None
     
-    # Handles underflow
+    # Handles underflow.
     if end < start:
-        return "00:00:00"
+        # Pad an extra 0 in front for single digit hours.
+        return f"-{re.sub(r'^(\d):', r'0\1:', str(start - end))}"
     
-    # Pad an extra 0 in front for single digit hours.
     return re.sub(r'^(\d):', r'0\1:', str(end - start))
 
 
