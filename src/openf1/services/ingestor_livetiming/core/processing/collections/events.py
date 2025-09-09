@@ -1348,7 +1348,6 @@ class EventsCollection(Collection):
                 lambda: message.topic == "DriverRaceInfo",
                 lambda: self.session_type == "Race",
                 # Overtakes after the session has finished are likely penalties and should not be counted
-                # but ignoring them affects the resulting sort order - might be caused by internal state updates resulting in a "lesser" hash
                 lambda: self.session_status in ("Aborted", "Started"),
                 lambda: deep_get(obj=message.content, key="OvertakeState") is not None,
                 lambda: deep_get(obj=message.content, key="Position") is not None
@@ -1361,8 +1360,7 @@ class EventsCollection(Collection):
             EventCause.PIT: lambda message: all(cond() for cond in [
                 lambda: message.topic == "TimingAppData",
                 lambda: self.session_type == "Race",
-                # Pit stops before the session has started should not be counted including pit stops on formation lap
-                # but ignoring them affects the resulting sort order - also might be caused by internal state updates
+                # Pit stops before the session has started should not be counted including pit stops on formation lap\
                 lambda: self.session_status in ("Aborted", "Started"),
                 lambda: isinstance(deep_get(obj=message.content, key="Compound"), str)
             ]),
@@ -1372,24 +1370,29 @@ class EventsCollection(Collection):
                 lambda: "TRACK LIMITS" in deep_get(obj=message.content, key="Message")
             ]),
 
+            # Ignore flag messages before and after the actual session
             EventCause.BLACK_FLAG: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_status in ("Aborted", "Started"),
                 # Check that message is a str to avoid TypeError when searching for substring
                 lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "BLACK" in deep_get(obj=message.content, key="Message")
             ]), # Black flags do not have a "Flag" field
             EventCause.BLACK_AND_ORANGE_FLAG: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_status in ("Aborted", "Started"),
                 lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "BLACK AND ORANGE" in deep_get(obj=message.content, key="Message")
             ]),
             EventCause.BLACK_AND_WHITE_FLAG: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_status in ("Aborted", "Started"),
                 lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
                 lambda: "BLACK AND WHITE" in deep_get(obj=message.content, key="Message")
             ]),
             EventCause.BLUE_FLAG: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_status in ("Aborted", "Started"),
                 lambda: deep_get(obj=message.content, key="Flag") == "BLUE"
             ]),
             EventCause.INCIDENT_VERDICT: lambda message: all(cond() for cond in [
@@ -1412,18 +1415,22 @@ class EventsCollection(Collection):
                 lambda: deep_get(obj=message.content, key="SessionPart") in (2, 3)
             ]),
 
+            # Ignore flag messages before and after the actual session
             EventCause.GREEN_FLAG: lambda message: all(cond() for cond in [
-                lambda: message.topic == "RaceControlMessages"
+                lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_status in ("Aborted", "Started")
             ]) and any(cond() for cond in [
                 lambda: deep_get(obj=message.content, key="Flag") == "GREEN",
                 lambda: deep_get(obj=message.content, key="Flag") == "CLEAR",
             ]),
             EventCause.YELLOW_FLAG: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_status in ("Aborted", "Started"),
                 lambda: deep_get(obj=message.content, key="Flag") == "YELLOW"
             ]),
             EventCause.DOUBLE_YELLOW_FLAG: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
+                lambda: self.session_status in ("Aborted", "Started"),
                 lambda: deep_get(obj=message.content, key="Flag") == "DOUBLE YELLOW"
             ]),
             
@@ -1554,9 +1561,13 @@ class EventsCollection(Collection):
             ]),
 
             # Must be last since other events satisfy this condition
+            # Ignore messages before and after the actual session
             EventCause.RACE_CONTROL_MESSAGE: lambda message: all(cond() for cond in [
                 lambda: message.topic == "RaceControlMessages",
-                lambda: isinstance(deep_get(obj=message.content, key="Message"), str)
+                lambda: self.session_status in ("Aborted", "Started"),
+                lambda: isinstance(deep_get(obj=message.content, key="Message"), str),
+                # "Under investigation" redundant because of incident messages
+                lambda: "UNDER INVESTIGATION" not in deep_get(obj=message.content, key="Message"),
             ])
         }
 
