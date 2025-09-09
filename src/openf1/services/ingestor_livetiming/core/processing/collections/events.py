@@ -34,6 +34,10 @@ def _get_elapsed_time(start: datetime, end: datetime) -> str | None:
     if not isinstance(start, datetime) or not isinstance(end, datetime):
         return None
     
+    # Handles underflow
+    if end < start:
+        return "00:00:00"
+    
     # Pad an extra 0 in front for single digit hours.
     return re.sub(r'^(\d):', r'0\1:', str(end - start))
 
