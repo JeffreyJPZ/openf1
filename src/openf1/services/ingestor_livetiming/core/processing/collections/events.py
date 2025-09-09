@@ -38,7 +38,7 @@ def _get_elapsed_time(start: datetime, end: datetime) -> str | None:
     # Handles underflow.
     if end < start:
         # Pad an extra 0 in front for single digit hours.
-        return f"-{re.sub(r'^(\d):', r'0\1:', str(start - end))}"
+        return "-" + re.sub(r'^(\d):', r'0\1:', str(start - end))
     
     return re.sub(r'^(\d):', r'0\1:', str(end - start))
 
