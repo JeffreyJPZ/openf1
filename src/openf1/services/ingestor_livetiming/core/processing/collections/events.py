@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Callable, ClassVar, Iterator, Literal, TypedDict
+from typing import Callable, Iterator, Literal, TypedDict
 
 import pytz
 
@@ -216,14 +216,6 @@ class EventsCollection(Collection):
         "TimingData"
     }
 
-    # Used to select between the old "PitLaneTimeCollection" and new "PitStopSeries" pit data topic,
-    # where the new topic contains pit stationary time and first appears during the 2024 US GP weekend,
-    # only for races
-    NEW_RACE_PIT_TOPIC_CUTOFF_DATE: ClassVar[datetime] = add_timezone_info(
-        dt=datetime(year=2024, month=10, day=18, hour=12, minute=30, second=0),
-        gmt_offset="-05:00:00"
-    )
-
     session_stream_start: datetime = field(default=None)
 
     # Since messages are sorted by timepoint and then by topic we only need to keep the most recent data from other topics?
@@ -237,7 +229,7 @@ class EventsCollection(Collection):
 
     # Combine latest stint data with latest pit data for pit event - stint number should be one more than pit number
     driver_stints: dict[int, dict[Literal["compound", "tyre_age_at_start"], int | str]] = field(default_factory=lambda: defaultdict(dict))
-    driver_pits: dict[int, dict[Literal["date", "pit_lane_duration", "pit_stop_duration", "lap_number"], datetime | float | int]] = field(default_factory=lambda: defaultdict(dict))
+    driver_pits: dict[int, dict[Literal["date", "pit_lane_duration", "pit_stop_duration", "pit_stop_duration_is_stale", "lap_number"], bool | datetime | float | int]] = field(default_factory=lambda: defaultdict(dict))
 
     # Track latest driver locations
     driver_locations: dict[int, dict[Literal["x", "y", "z"], int]] = field(default_factory=lambda: defaultdict(dict))
@@ -477,8 +469,8 @@ class EventsCollection(Collection):
     def _update_driver_pit(
             self,
             driver_number: int,
-            key: Literal["date", "pit_lane_duration", "pit_stop_duration", "lap_number"],
-            value: datetime | float | int
+            key: Literal["date", "pit_lane_duration", "pit_stop_duration", "pit_stop_duration_is_stale" "lap_number"],
+            value: bool | datetime | float | int
         ):
         driver_pit = self.driver_pits[driver_number]
         old_value = driver_pit.get(key)
@@ -511,7 +503,19 @@ class EventsCollection(Collection):
                 lap_number = int(lap_number)
             except:
                 continue
+            
+            # Mark pit stop duration as stale if latest pit date is not within 5 seconds of current (pit) message date
+            # (i.e. the message is likely not about the same pit)
+            # If the current message is about the same pit and contains a pit stop duration, pit stop duration should eventually be marked as not stale
+            latest_pit_date = self.driver_pits.get(driver_number, {}).get("date")
+            if abs(message.timepoint - latest_pit_date) > timedelta(seconds=5):
+                self._update_driver_pit(
+                    driver_number=driver_number,
+                    key="pit_stop_duration_is_stale",
+                    value=True
+                )
 
+            # Update pit data
             self._update_driver_pit(
                 driver_number=driver_number,
                 key="date",
@@ -528,7 +532,7 @@ class EventsCollection(Collection):
                 value=lap_number
             )
 
-            # From 2025 onwards, get the stationary time if it exists
+            # From 2024 US GP onwards, get the stationary time if it exists
             pit_stop_duration = deep_get(obj=data, key="PitStopTime")
 
             if pit_stop_duration is not None:
@@ -541,6 +545,13 @@ class EventsCollection(Collection):
                     driver_number=driver_number,
                     key="pit_stop_duration",
                     value=pit_stop_duration
+                )
+
+                # Mark pit stop duration as not stale
+                self._update_driver_pit(
+                    driver_number=driver_number,
+                    key="pit_stop_duration_is_stale",
+                    value=False
                 )
 
 
@@ -875,6 +886,8 @@ class EventsCollection(Collection):
             # Prioritize date from pit information
             date = self.driver_pits.get(driver_number, {}).get("date") if self.driver_pits.get(driver_number, {}).get("date") is not None else message.timepoint
             lap_number = self.driver_pits.get(driver_number, {}).get("lap_number") if self.driver_pits.get(driver_number, {}).get("lap_number") is not None else self.lap_number
+            # Include pit stop duration only if not stale
+            pit_stop_duration = self.driver_pits.get(driver_number, {}).get("pit_stop_duration") if not self.driver_pits.get(driver_number, {}).get("pit_stop_duration_is_stale") else None
 
             details: EventDetails = {
                 "lap_number": lap_number,
@@ -882,7 +895,7 @@ class EventsCollection(Collection):
                 "compound": self.driver_stints.get(driver_number, {}).get("compound"),
                 "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start"),
                 "pit_lane_duration": self.driver_pits.get(driver_number, {}).get("pit_lane_duration"),
-                "pit_stop_duration": self.driver_pits.get(driver_number, {}).get("pit_stop_duration")
+                "pit_stop_duration": pit_stop_duration
             }
 
             yield Event(
@@ -1630,13 +1643,13 @@ class EventsCollection(Collection):
             case "LapCount":
                 self._update_lap_number(message)
             case "PitLaneTimeCollection":
-                # Use "PitLaneTimeCollection" topic for sessions before the 2024 US GP weekend or for non-races afterward
-                if self.session_type != "Race" or (self.session_start is not None and self.session_start < self.NEW_RACE_PIT_TOPIC_CUTOFF_DATE):
-                    self._update_driver_pits(message)
+                # PitLaneTimeCollection acts as a fallback in case PitStopSeries doesn't exist or doesn't have a corresponding message
+                # Need to mark pit stop time as stale if latest pit date is not within some delta of message date for PitLaneTimeCollection
+                self._update_driver_pits(message)
             case "PitStopSeries":
-                # Use "PitStopSeries" topic from the 2024 US GP afterward for races only
-                if self.session_type == "Race" and (self.session_start is not None and self.session_start >= self.NEW_RACE_PIT_TOPIC_CUTOFF_DATE):
-                    self._update_driver_pits(message)
+                # Contains pit stop time, used from the 2024 US GP onwards
+                # Need to mark pit stop time as not stale
+                self._update_driver_pits(message)
             case "Position.z":
                 self._update_driver_locations(message)
             case "SessionData":
