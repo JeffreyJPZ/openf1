@@ -810,32 +810,16 @@ class EventsCollection(Collection):
             except:
                 position = None
 
-            # Check for and compare lap times (up to thousandths precision)
-            if position is not None and math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
+            # Check for and compare lap times (up to thousandths precision) to ensure recent lap is personal best
+            if math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
                 # If "Position" field exists and "BestLapTime" and "LastLapTime" values are equal,
                 # then driver has set a personal best lap resulting in a position change
+                # Otherwise, driver has set a personal best lap, but no change in position (use existing position)
+                position = position if position is not None else self.driver_positions.get(driver_number)
+
                 details: EventDetails = {
                     "driver_roles": {f"{driver_number}": "initiator"},
                     "position": position,
-                    "lap_duration": best_lap_time,
-                    "compound": self.driver_stints.get(driver_number, {}).get("compound"),
-                    "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start")
-                }
-
-                yield Event(
-                    meeting_key=self.meeting_key,
-                    session_key=self.session_key,
-                    date=message.timepoint,
-                    elapsed_time=_get_elapsed_time(start=self.session_stream_start, end=message.timepoint),
-                    category=EventCategory.DRIVER_ACTION.value,
-                    cause=EventCause.PERSONAL_BEST_LAP.value,
-                    details=details
-                )
-            elif math.isclose(a=best_lap_time, b=last_lap_time, rel_tol=1e-3):
-                # If only "BestLapTime" and "LastLapTime" values are equal, then driver has set a personal best lap,
-                # but no change in position
-                details: EventDetails = {
-                    "driver_roles": {f"{driver_number}": "initiator"},
                     "lap_duration": best_lap_time,
                     "compound": self.driver_stints.get(driver_number, {}).get("compound"),
                     "tyre_age_at_start": self.driver_stints.get(driver_number, {}).get("tyre_age_at_start")
