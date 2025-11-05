@@ -8,9 +8,9 @@ _url = os.getenv("OPENF1_MQTT_URL")
 _port_str = os.getenv("OPENF1_MQTT_PORT")
 _username = os.getenv("OPENF1_MQTT_USERNAME")
 _password = os.getenv("OPENF1_MQTT_PASSWORD")
+_disable_tls = os.getenv("OPENF1_MQTT_NO_TLS")
 
-_tls_context = ssl.create_default_context()
-
+_tls_context = None if _disable_tls.lower() == "true" else ssl.create_default_context()
 _client: Client | None = None
 
 

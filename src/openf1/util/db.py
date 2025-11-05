@@ -1,6 +1,7 @@
 from collections import defaultdict
 import json
 import os
+from collections import defaultdict
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
@@ -10,7 +11,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import InsertOne, MongoClient, UpdateOne
 from pymongo.errors import BulkWriteError
 
-from openf1.util.misc import dict_without_keys, hash_obj, timed_cache
+from openf1.util.misc import hash_obj, timed_cache
 
 _MONGO_CONNECTION_STRING = os.getenv("MONGO_CONNECTION_STRING")
 _MONGO_DATABASE = os.getenv("OPENF1_DB_NAME", "openf1-livetiming")
@@ -35,7 +36,9 @@ def _get_mongo_db_async():
     return client[_MONGO_DATABASE]
 
 
-async def get_documents(collection_name: str, filters: dict[str, list[dict]]) -> list[dict]:
+async def get_documents(
+    collection_name: str, filters: dict[str, list[dict]]
+) -> list[dict]:
     """Retrieves documents from a specified MongoDB collection, applies filters,
     and sorts.
 
@@ -81,7 +84,9 @@ async def get_documents(collection_name: str, filters: dict[str, list[dict]]) ->
     return results
 
 
-def _get_bounded_inequality_predicate_pairs(predicates: list[dict]) -> list[tuple[dict, dict]]:
+def _get_bounded_inequality_predicate_pairs(
+    predicates: list[dict],
+) -> list[tuple[dict, dict]]:
     """
     Greedy matching algorithm for pairing predicates in the form {op: value}
     where op is a MongoDB inequality operator such as "$gt", "$gte", "$lt", or "$lte".
@@ -105,20 +110,20 @@ def _get_bounded_inequality_predicate_pairs(predicates: list[dict]) -> list[tupl
     lower_bound_predicates = [
         predicate
         for predicate in predicates
-        if predicate.get("$gt") is not None or predicate.get("$gte") is not None
+        if "$gt" in predicate or "$gte" in predicate
     ]
     upper_bound_predicates = [
         predicate
         for predicate in predicates
-        if predicate.get("$lt") is not None or predicate.get("$lte") is not None
+        if "$lt" in predicate or "$lte" in predicate
     ]
 
     # Sort predicates in reverse order for some minor optimization
     lower_bound_predicates.sort(
-        key=lambda predicate: list(predicate.values())[0], reverse=True
+        key=lambda predicate: _get_predicate_value(predicate), reverse=True
     )
     upper_bound_predicates.sort(
-        key=lambda predicate: list(predicate.values())[0], reverse=True
+        key=lambda predicate: _get_predicate_value(predicate), reverse=True
     )
 
     bounded_ineq_predicate_pairs = []
@@ -131,9 +136,8 @@ def _get_bounded_inequality_predicate_pairs(predicates: list[dict]) -> list[tupl
         # If the lower bound predicate is <= the upper bound predicate, a pair has been found
         closest_upper_bound_predicate = None
         for i in reversed(range(len(upper_bound_predicates))):
-            if (
-                list(lower_bound_predicate.values())[0]
-                <= list(upper_bound_predicates[i].values())[0]
+            if _get_predicate_value(lower_bound_predicate) <= _get_predicate_value(
+                upper_bound_predicates[i]
             ):
                 closest_upper_bound_predicate = upper_bound_predicates.pop(i)
                 break
@@ -147,6 +151,13 @@ def _get_bounded_inequality_predicate_pairs(predicates: list[dict]) -> list[tupl
         )
 
     return bounded_ineq_predicate_pairs
+
+
+def _get_predicate_value(predicate: dict) -> Any:
+    """
+    Returns the first value in a predicate if it exists, otherwise returns None.
+    """
+    return next((value for value in predicate.values()), None)
 
 
 def _get_unique_predicates(predicates: list[dict]) -> list[dict]:
@@ -184,12 +195,12 @@ def _generate_query_predicate(filters: dict[str, list[dict]]) -> dict:
         filtered_predicates = _get_unique_predicates(predicates)
 
         eq_predicates = [
-            predicate
-            for predicate in filtered_predicates
-            if predicate.get("$eq") is not None
+            predicate for predicate in filtered_predicates if "$eq" in predicate
         ]
 
-        bounded_ineq_predicate_pairs = _get_bounded_inequality_predicate_pairs(filtered_predicates)
+        bounded_ineq_predicate_pairs = _get_bounded_inequality_predicate_pairs(
+            filtered_predicates
+        )
 
         # Predicates that are neither paired nor equality predicates are unbounded inequality predicates
         bounded_ineq_predicates = [

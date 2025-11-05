@@ -4,6 +4,11 @@
 
 Some data about each car, at a sample rate of about 3.7 Hz.
 
+<aside class="notice">
+Live data for this endpoint is currently unavailable during sessions.  
+The data will be provided shortly after each session instead.
+</aside>
+
 ```shell
 curl "https://api.openf1.org/v1/car_data?driver_number=55&session_key=9159&speed>=315"
 ```
@@ -247,15 +252,20 @@ fetch("https://api.openf1.org/v1/drivers?driver_number=1&session_key=9158")
             Fetches real-time interval data between drivers and their gap to the race leader.
             Available during races only, with updates approximately every 4 seconds.
 
+<aside class="notice">
+Live data for this endpoint is currently unavailable during sessions.  
+The data will be provided shortly after each session instead.
+</aside>
+
 ```shell
-curl "https://api.openf1.org/v1/intervals?session_key=9165&interval<0.005"
+curl "https://api.openf1.org/v1/intervals?session_key=9165&interval>0&interval<0.005"
 ```
 
 ```python
 from urllib.request import urlopen
 import json
 
-response = urlopen('https://api.openf1.org/v1/intervals?session_key=9165&interval<0.005')
+response = urlopen('https://api.openf1.org/v1/intervals?session_key=9165&interval>0&interval<0.005')
 data = json.loads(response.read().decode('utf-8'))
 print(data)
 
@@ -272,7 +282,7 @@ print(data)
 library(httr)
 library(jsonlite)
 
-response <- GET('https://api.openf1.org/v1/intervals?session_key=9165&interval<0.005')
+response <- GET('https://api.openf1.org/v1/intervals?session_key=9165&interval>0&interval<0.005')
 parsed_data <- fromJSON(content(response, 'text'))
 print(parsed_data)
 
@@ -282,7 +292,9 @@ print(parsed_data)
 ```
 
 ```javascript
-fetch("https://api.openf1.org/v1/intervals?session_key=9165&interval<0.005")
+fetch(
+  "https://api.openf1.org/v1/intervals?session_key=9165&interval>0&interval<0.005"
+)
   .then((response) => response.json())
   .then((jsonContent) => console.log(jsonContent));
 ```
@@ -477,6 +489,11 @@ fetch(
             Useful for gauging their progress along the track, but lacks details about lateral placement — i.e. whether
             the car is on the left or right side of the track. The origin point (0, 0, 0) appears to be arbitrary
             and not tied to any specific location on the track.
+
+<aside class="notice">
+Live data for this endpoint is currently unavailable during sessions.  
+The data will be provided shortly after each session instead.
+</aside>
 
 ```shell
 curl "https://api.openf1.org/v1/location?session_key=9161&driver_number=81&date>2023-09-16T13:03:35.200&date<2023-09-16T13:03:35.800"
@@ -1438,14 +1455,14 @@ fetch("https://api.openf1.org/v1/team_radio?session_key=9158&driver_number=11")
 ```json
 [
   {
-    "date": "2023-09-15T09:40:43.005000",
+    "date": "2023-09-15T09:40:43.005000+00:00",
     "driver_number": 11,
     "meeting_key": 1219,
     "recording_url": "https://livetiming.formula1.com/static/2023/2023-09-17_Singapore_Grand_Prix/2023-09-15_Practice_1/TeamRadio/SERPER01_11_20230915_104008.mp3",
     "session_key": 9158
   },
   {
-    "date": "2023-09-15T10:32:47.325000",
+    "date": "2023-09-15T10:32:47.325000+00:00",
     "driver_number": 11,
     "meeting_key": 1219,
     "recording_url": "https://livetiming.formula1.com/static/2023/2023-09-17_Singapore_Grand_Prix/2023-09-15_Practice_1/TeamRadio/SERPER01_11_20230915_113201.mp3",
