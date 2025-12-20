@@ -212,3 +212,8 @@ def hash_obj(obj):
     else:
         # Assume obj is hashable
         return obj
+    
+
+def dict_without_keys(obj: dict, keys: list[str]) -> dict:
+    """Returns a new dict without the given keys."""
+    return {key: value for key, value in obj.items() if key not in keys}
