@@ -2,10 +2,11 @@ from collections import defaultdict
 import json
 import os
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any
 
+from bson.codec_options import CodecOptions
 from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import InsertOne, MongoClient, UpdateOne
@@ -20,14 +21,40 @@ _SORT_KEYS = [
     "date_start",
     "meeting_key",
     "session_key",
+    "position_current",
     "_id",
 ]
 
+_MAX_QUERY_TIME_MS = 5000
 
-_mongo_db_sync = MongoClient(_MONGO_CONNECTION_STRING, maxPoolSize=100)[_MONGO_DATABASE]
-_mongo_db_async = AsyncIOMotorClient(_MONGO_CONNECTION_STRING, maxPoolSize=100)[
-    _MONGO_DATABASE
-]
+_client_sync = None
+_client_async = None
+
+
+def _get_mongo_client_sync():
+    """Creates the Sync client only when called (lazy loading), ensuring fork safety"""
+    global _client_sync
+    if _client_sync is None:
+        _client_sync = MongoClient(_MONGO_CONNECTION_STRING, maxPoolSize=100)
+    return _client_sync
+
+
+def _get_mongo_client_async():
+    """Creates the Async client only when called (lazy loading), ensuring fork safety"""
+    global _client_async
+    if _client_async is None:
+        _client_async = AsyncIOMotorClient(_MONGO_CONNECTION_STRING, maxPoolSize=100)
+    return _client_async
+
+
+def _get_mongo_db_sync():
+    opts = CodecOptions(tz_aware=True, tzinfo=timezone.utc)
+    return _get_mongo_client_sync().get_database(_MONGO_DATABASE, codec_options=opts)
+
+
+def _get_mongo_db_async():
+    opts = CodecOptions(tz_aware=True, tzinfo=timezone.utc)
+    return _get_mongo_client_async().get_database(_MONGO_DATABASE, codec_options=opts)
 
 
 async def get_documents(
@@ -35,47 +62,29 @@ async def get_documents(
 ) -> list[dict]:
     """Retrieves documents from a specified MongoDB collection, applies filters,
     and sorts.
-
-    - For 'meetings', the earliest document is returned to reflect the start time of the
-      first session.
-    - For all other collections, the latest document is returned to ensure the most
-      up-to-date information.
+    The latest document is returned to ensure the most up-to-date information.
     """
-    presort_direction = 1 if collection_name == "meetings" else -1
-
-    collection = _mongo_db_async[collection_name]
+    collection = _get_mongo_db_async()[collection_name]
     pipeline = [
         # Apply user filters
         {"$match": _generate_query_predicate(filters)},
-        {"$sort": {"_id": presort_direction}},
+        {"$sort": {"_id": -1}},
         # Group all versions of the same document and keep only the first one
         {"$group": {"_id": "$_key", "document": {"$first": "$$ROOT"}}},
         {"$replaceRoot": {"newRoot": "$document"}},
         # Sort
         {"$sort": {key: 1 for key in _SORT_KEYS}},
-        # Remove fields starting with '_'
-        {
-            "$replaceWith": {
-                "$arrayToObject": {
-                    "$filter": {
-                        "input": {"$objectToArray": "$$ROOT"},
-                        "as": "field",
-                        "cond": {"$ne": [{"$substrCP": ["$$field.k", 0, 1]}, "_"]},
-                    }
-                }
-            }
-        },
     ]
-    cursor = collection.aggregate(pipeline)
+
+    cursor = collection.aggregate(pipeline, maxTimeMS=_MAX_QUERY_TIME_MS)
     results = await cursor.to_list(length=None)
 
-    # Add UTC timezone if not set
-    for res in results:
-        for key, val in res.items():
-            if isinstance(val, datetime) and val.tzinfo is None:
-                res[key] = res[key].replace(tzinfo=timezone.utc)
+    cleaned_results = []
+    for doc in results:
+        cleaned_doc = {k: v for k, v in doc.items() if not k.startswith("_")}
+        cleaned_results.append(cleaned_doc)
 
-    return results
+    return cleaned_results
 
 
 def _get_bounded_inequality_predicate_pairs(
@@ -243,18 +252,21 @@ def _generate_query_predicate(filters: dict[str, list[dict]]) -> dict:
 
 @timed_cache(60)  # Cache the output for 1 minute
 def get_latest_session_info() -> dict:
-    sessions = _mongo_db_sync["sessions"]
-    latest_session = sessions.find_one(sort=[("date_start", -1)])
+    sessions = _get_mongo_db_sync()["sessions"]
+    threshold = datetime.now(timezone.utc) + timedelta(seconds=60)
+    latest_session = sessions.find_one(
+        {"date_start": {"$lte": threshold}}, sort=[("date_start", -1)]
+    )
 
     if latest_session:
         return latest_session
     else:
-        raise SystemError("Could not find any session in MongoDB")
+        raise SystemError("Could not find any past or current session in MongoDB")
 
 
 @lru_cache()
 def session_key_to_path(session_key: int) -> str | None:
-    sessions = _mongo_db_sync["sessions"]
+    sessions = _get_mongo_db_sync()["sessions"]
 
     session = sessions.find_one(
         {"session_key": session_key, "_path": {"$exists": True}},
@@ -266,7 +278,7 @@ def session_key_to_path(session_key: int) -> str | None:
 
 def insert_data_sync(collection_name: str, docs: list[dict], batch_size: int = 50_000):
     """Inserts documents into a MongoDB collection in batches"""
-    collection = _mongo_db_sync[collection_name]
+    collection = _get_mongo_db_sync()[collection_name]
 
     for i in range(0, len(docs), batch_size):
         batch = docs[i : i + batch_size]
@@ -282,11 +294,9 @@ def insert_data_sync(collection_name: str, docs: list[dict], batch_size: int = 5
 
 
 def upsert_data_sync(collection_name: str, docs: list[dict], batch_size: int = 50_000):
-    """
-    Upserts (inserts or replaces) documents into a MongoDB collection in batches
-    based on _key.
-    """
-    collection = _mongo_db_sync[collection_name]
+    """Upserts (inserts or replaces) documents into a MongoDB collection in batches
+    based on _key."""
+    collection = _get_mongo_db_sync()[collection_name]
 
     for i in range(0, len(docs), batch_size):
         batch = docs[i : i + batch_size]
@@ -309,11 +319,7 @@ def upsert_data_sync(collection_name: str, docs: list[dict], batch_size: int = 5
 
 
 async def insert_data_async(collection_name: str, docs: list[dict]):
-    """
-    Inserts documents into a MongoDB collection asynchronously.
-    Documents will continue to be inserted even if an error occurs during write.
-    """
-    collection = _mongo_db_async[collection_name]
+    collection = _get_mongo_db_async()[collection_name]
 
     try:
         operations = [InsertOne(doc) for doc in docs]
