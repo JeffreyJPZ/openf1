@@ -1,3 +1,4 @@
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -16,6 +17,54 @@ HEADERS = {
 app = typer.Typer()
 session = requests.Session()
 session.headers.update(HEADERS)
+
+
+@dataclass
+class Meeting:
+    meeting_key: int
+    meeting_name: str
+    meeting_official_name: str
+    location: str
+
+    country_key: int
+    country_code: str
+    country_name: str
+    country_flag: str
+
+    circuit_key: int
+    circuit_short_name: str
+    circuit_type: str
+    circuit_info_url: str
+    circuit_image: str
+
+    gmt_offset: str
+    date_start: datetime
+    date_end: datetime
+
+    year: int
+
+
+@dataclass
+class Session:
+    session_key: int
+    session_type: str
+    session_name: str
+
+    date_start: datetime
+    date_end: datetime
+
+    meeting_key: int
+
+    circuit_key: int
+    circuit_short_name: str
+
+    country_key: int
+    country_code: str
+    country_name: str
+
+    location: str
+    gmt_offset: str
+    year: int
 
 
 def _to_utc(date_str: str, offset_str: str) -> datetime:
@@ -61,7 +110,7 @@ def _normalize_session_type_and_name(
             return session_type, session_name
 
 
-def get_meetings(year: int | None = None) -> list[dict]:
+def get_meetings(year: int | None = None) -> list[Meeting]:
     """Fetches list of meetings for a specific year or the latest season."""
     url = f"{BASE_URL}/editorial-eventlisting/events"
     params = {"season": year} if year else {}
@@ -70,35 +119,36 @@ def get_meetings(year: int | None = None) -> list[dict]:
     resp.raise_for_status()
     data = resp.json()
 
-    results = []
+    meetings = []
     for event in data["events"]:
         offset = _convert_gmt_offset(event["gmtOffset"])
-        results.append(
-            {
-                "meeting_key": int(event["meetingKey"]),
-                "meeting_name": event["meetingName"],
-                "meeting_official_name": event["meetingOfficialName"],
-                "location": event["meetingLocation"],
-                "country_key": int(event["countryKey"]),
-                "country_code": event["meetingCountryCode"],
-                "country_name": event["meetingIsoCountryName"],
-                "country_flag": event["countryFlag"],
-                "circuit_key": int(event["circuitKey"]),
-                "circuit_short_name": event["circuitShortName"],
-                "circuit_type": event["circuitType"],
-                "circuit_info_url": (
-                    "https://api.multiviewer.app/api/v1/circuits/"
-                    + f"{event['circuitKey']}/{data['year']}"
-                ),
-                "circuit_image": event["circuitMediumImage"],
-                "gmt_offset": offset,
-                "date_start": _to_utc(event["meetingStartDate"], offset),
-                "date_end": _to_utc(event["meetingEndDate"], offset),
-                "year": int(data["year"]),
-            }
-        )
 
-    return results
+        meeting_dict = {
+            "meeting_key": int(event["meetingKey"]),
+            "meeting_name": event["meetingName"],
+            "meeting_official_name": event["meetingOfficialName"],
+            "location": event["meetingLocation"],
+            "country_key": int(event["countryKey"]),
+            "country_code": event["meetingCountryCode"],
+            "country_name": event["meetingIsoCountryName"],
+            "country_flag": event["countryFlag"],
+            "circuit_key": int(event["circuitKey"]),
+            "circuit_short_name": event["circuitShortName"],
+            "circuit_type": event["circuitType"],
+            "circuit_info_url": (
+                "https://api.multiviewer.app/api/v1/circuits/"
+                + f"{event['circuitKey']}/{data['year']}"
+            ),
+            "circuit_image": event["circuitMediumImage"],
+            "gmt_offset": offset,
+            "date_start": _to_utc(event["meetingStartDate"], offset),
+            "date_end": _to_utc(event["meetingEndDate"], offset),
+            "year": int(data["year"]),
+        }
+
+        meetings.append(Meeting(**meeting_dict))
+
+    return meetings
 
 
 def _get_timetable(meeting_key: int) -> list[dict]:
@@ -109,7 +159,7 @@ def _get_timetable(meeting_key: int) -> list[dict]:
     return resp.json()["meetingContext"]["timetables"]
 
 
-def get_sessions(year: int | None = None) -> list[dict]:
+def get_sessions(year: int | None = None) -> list[Session]:
     """Fetches all sessions for a specific year or the latest season."""
     meetings = get_meetings(year)
     sessions = []
@@ -122,24 +172,24 @@ def get_sessions(year: int | None = None) -> list[dict]:
                 session_type=sess["sessionType"], session_name=sess["description"]
             )
 
-            sessions.append(
-                {
-                    "session_key": sess["meetingSessionKey"],
-                    "session_type": session_type,
-                    "session_name": session_name,
-                    "date_start": _to_utc(sess["startTime"], meeting["gmt_offset"]),
-                    "date_end": _to_utc(sess["endTime"], meeting["gmt_offset"]),
-                    "meeting_key": meeting["meeting_key"],
-                    "circuit_key": meeting["circuit_key"],
-                    "circuit_short_name": meeting["circuit_short_name"],
-                    "country_key": meeting["country_key"],
-                    "country_code": meeting["country_code"],
-                    "country_name": meeting["country_name"],
-                    "location": meeting["location"],
-                    "gmt_offset": meeting["gmt_offset"],
-                    "year": meeting["year"],
-                }
-            )
+            session_dict = {
+                "session_key": sess["meetingSessionKey"],
+                "session_type": session_type,
+                "session_name": session_name,
+                "date_start": _to_utc(sess["startTime"], meeting["gmt_offset"]),
+                "date_end": _to_utc(sess["endTime"], meeting["gmt_offset"]),
+                "meeting_key": meeting["meeting_key"],
+                "circuit_key": meeting["circuit_key"],
+                "circuit_short_name": meeting["circuit_short_name"],
+                "country_key": meeting["country_key"],
+                "country_code": meeting["country_code"],
+                "country_name": meeting["country_name"],
+                "location": meeting["location"],
+                "gmt_offset": meeting["gmt_offset"],
+                "year": meeting["year"],
+            }
+
+            sessions.append(Session(**session_dict))
 
     return sessions
 
@@ -159,17 +209,21 @@ def _ingest(data: list[dict], collection: str, id_field: str):
 
 
 @app.command()
-def ingest_meetings(year: int = typer.Option(None, help="Season year")):
-    """Ingest meeting data into the database."""
-    data = get_meetings(year)
-    _ingest(data, "meetings", "meeting_key")
+def ingest_meetings(year: int = typer.Option(None, help="Season year")) -> list[Meeting]:
+    """Ingest meeting data into the database, returning meetings."""
+    meetings = get_meetings(year)
+    _ingest([asdict(meeting) for meeting in meetings], "meetings", "meeting_key")
+
+    return meetings
 
 
 @app.command()
-def ingest_sessions(year: int = typer.Option(None, help="Season year")):
-    """Ingest session data into the database."""
-    data = get_sessions(year)
-    _ingest(data, "sessions", "session_key")
+def ingest_sessions(year: int = typer.Option(None, help="Season year")) -> list[Session]:
+    """Ingest session data into the database, returning sessions."""
+    sessions = get_sessions(year)
+    _ingest([asdict(session) for session in sessions], "sessions", "session_key")
+
+    return sessions
 
 
 if __name__ == "__main__":

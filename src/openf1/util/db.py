@@ -336,7 +336,7 @@ async def upsert_data_async(collection_name: str, docs: list[dict]):
     Upserts (inserts or replaces) documents into a MongoDB collection asynchronously
     based on _key. Documents will continue to be inserted even if an error occurs during write.
     """
-    collection = _mongo_db_async()[collection_name]
+    collection = _get_mongo_db_async()[collection_name]
 
     try:
         operations = [

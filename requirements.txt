@@ -2,6 +2,7 @@ aiohttp==3.12.13
 aiomqtt==2.4.0
 beautifulsoup4==4.13.4
 cachetools==5.5.2
+dapr==1.16.1
 fastapi==0.115.13
 fastf1_livetiming @ git+https://github.com/br-g/fastf1-livetiming.git#egg=fastf1_livetiming
 google-cloud-storage==3.1.1
